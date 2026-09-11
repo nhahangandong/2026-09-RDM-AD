@@ -96,10 +96,3 @@ function recipeBomPopulateNames() {
   ui.alert("✅ Thành công", `Đã cập nhật tự động tên cho ${updatedCount} ô trong RECIPE_BOM!`, ui.ButtonSet.OK);
 }
 
-/**
- * Private Helper làm sạch chuỗi
- */
-function cleanCodeValue_(val) {
-  if (val === null || val === undefined) return "";
-  return val.toString().trim();
-}

@@ -578,10 +578,4 @@ function itemMasterSyncFromMenu() {
   ui.alert("✅ Thành công", `Đã đồng bộ thành công ${rowsToAdd.length} Mã món từ MENU sang ITEM_MASTER!`, ui.ButtonSet.OK);
 }
 
-/**
- * Private Helper làm sạch dữ liệu
- */
-function cleanCodeValue_(val) {
-  if (val === null || val === undefined) return "";
-  return val.toString().trim();
-}
+

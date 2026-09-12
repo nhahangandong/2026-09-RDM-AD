@@ -1,124 +1,191 @@
 /**
  * ============================================================================
  * MODULE: ItemMaster.gs
- * MỤC ĐÍCH: Xử lý quét dữ liệu raw_name, sinh mã SKU/nhãn unmapped và đồng bộ.
+ * MỤC ĐÍCH: Xử lý logic nghiệp vụ danh mục vật tư/hàng hóa ITEM_MASTER.
+ * Quy tắc đặt tên: itemMasterActionEntity (CamelCase)
  * ============================================================================
  */
+
 /**
- * Đồng bộ tự động ITEM_MASTER từ TRANSACTION và STOCKTAKE.
- * Chỉ thêm mới mã SKU, đồng thời điền 2 trường: Mã SKU và Tên chuẩn từ MAPPING.
+ * Core: Đồng bộ tự động ITEM_MASTER từ các sheet Raw Data thuộc nhóm INVENTORY.
+ * - Đọc bảng RAW_SOURCE_GROUP để xác định các Schema thuộc nhóm INVENTORY.
+ * - Đọc tbl_route_map để LỌC BỎ các giao dịch thuộc tuyến Không tính tồn kho (Stock = FALSE).
+ * - Quét tất cả SKU hợp lệ từ các tuyến Stock = TRUE và tự động gán source_group = 'INVENTORY'.
  */
-function runSyncItemMasterFromInventoryAndStocktake() {
+function itemMasterSyncFromInventoryAndStocktake() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const ui = SpreadsheetApp.getUi();
 
-  // 1. Gọi API lấy cấu trúc SCHEMA chuẩn hóa
   const schemaMap = schemaGetMap();
   if (!schemaMap) {
-    ui.alert("⚠️ Lỗi Schema", "Không thể đọc hoặc cấu trúc sheet SCHEMA không hợp lệ!", ui.ButtonSet.OK);
+    ui.alert("⚠️ Lỗi", "Không thể đọc SCHEMA!", ui.ButtonSet.OK);
     return;
   }
 
-  // Lấy sheet_name vật lý động từ SCHEMA
   const mappingSheetName    = schemaGetSheetName(schemaMap, "MAPPING");
   const itemMasterSheetName = schemaGetSheetName(schemaMap, "ITEM_MASTER");
-  const transSheetName      = schemaGetSheetName(schemaMap, "TRANSACTION");
-  const stocktakeSheetName  = schemaGetSheetName(schemaMap, "STOCKTAKE") || schemaGetSheetName(schemaMap, "STOCK_TAKE");
 
   const mappingSheet    = mappingSheetName ? ss.getSheetByName(mappingSheetName) : null;
   const itemMasterSheet = itemMasterSheetName ? ss.getSheetByName(itemMasterSheetName) : null;
-  const transSheet      = transSheetName ? ss.getSheetByName(transSheetName) : null;
-  const stocktakeSheet  = stocktakeSheetName ? ss.getSheetByName(stocktakeSheetName) : null;
 
-  if (!mappingSheet || !itemMasterSheet || !transSheet) {
-    ui.alert("⚠️ Lỗi", "Thiếu một trong các sheet hệ thống cốt lõi (MAPPING, ITEM_MASTER, TRANSACTION)!", ui.ButtonSet.OK);
+  if (!mappingSheet || !itemMasterSheet) {
+    ui.alert("⚠️ Lỗi", "Thiếu sheet MAPPING hoặc ITEM_MASTER!", ui.ButtonSet.OK);
     return;
   }
 
-  const validItemCodes = new Set();
+  // -------------------------------------------------------------
+  // 1. PRE-LOAD: LẠM DỤNG BỘ NHỚ ĐỆM CHO ROUTE_MAP & LOCATION_MAP
+  // -------------------------------------------------------------
+  const validStockRoutes = new Set();
+  const routeInventoryPairMap = new Map(); // Luồng Pair (fromType -> toType) -> boolean
 
-  // --- NGUỒN 1: QUÉT TRANSACTION (ĐỊNH TUYẾN DYNAMIC QUA ROUTE_ENGINE) ---
-  const colFrom = schemaGetColIndex(schemaMap, "TRANSACTION", "from_code");
-  const colTo   = schemaGetColIndex(schemaMap, "TRANSACTION", "to_code");
-  const colItem = schemaGetColIndex(schemaMap, "TRANSACTION", "item_code");
+  const routeSheetName = schemaGetSheetName(schemaMap, "ROUTE_MAP");
+  const routeSheet = routeSheetName ? ss.getSheetByName(routeSheetName) : null;
 
-  if (colFrom !== -1 && colTo !== -1 && colItem !== -1) {
-    // Tải cache Map tra cứu từ RouteEngine để tối ưu tốc độ
-    const locationTypeMap = RouteEngine.getLocationTypeMap(ss, schemaMap);
-    const routeRulesMap   = RouteEngine.getRouteRulesMap(ss, schemaMap);
+  if (routeSheet) {
+    const routeData = routeSheet.getDataRange().getValues();
+    const colRouteCode   = schemaGetColIndex(schemaMap, "ROUTE_MAP", "route_code");
+    const colFromType    = schemaGetColIndex(schemaMap, "ROUTE_MAP", "from_code");
+    const colToType      = schemaGetColIndex(schemaMap, "ROUTE_MAP", "to_code");
+    const colIsInventory = schemaGetColIndex(schemaMap, "ROUTE_MAP", "is_inventory");
 
-    const transData = transSheet.getDataRange().getValues();
-    for (let i = 1; i < transData.length; i++) {
-      const row = transData[i];
-      const fromCode = cleanCodeValue_(row[colFrom]);
-      const toCode   = cleanCodeValue_(row[colTo]);
-      const itemVal  = cleanCodeValue_(row[colItem]);
+    if (colIsInventory !== -1 && routeData.length > 1) {
+      for (let i = 1; i < routeData.length; i++) {
+        const isStock = routeData[i][colIsInventory] === true || String(routeData[i][colIsInventory]).toUpperCase() === "TRUE";
+        
+        // Cache theo route_code
+        if (colRouteCode !== -1) {
+          const route = cleanCodeValue_(routeData[i][colRouteCode]);
+          if (route && isStock) validStockRoutes.add(route);
+        }
 
-      if (!itemVal || itemVal.toLowerCase().includes("unmapped")) continue;
-
-      // Tra cứu location_type từ code địa điểm
-      const fromType = locationTypeMap.get(fromCode) || "UNKNOWN";
-      const toType   = locationTypeMap.get(toCode) || "UNKNOWN";
-
-      // Lấy thông tin tuyến từ cặp Type->Type
-      const routeInfo = routeRulesMap.get(`${fromType}->${toType}`);
-
-      // Nếu tuyến giao dịch có cấu hình is_inventory = TRUE -> Thêm vào danh sách SKU kho
-      if (routeInfo && routeInfo.isInventory) {
-        validItemCodes.add(itemVal);
-      }
-    }
-  }
-
-  // --- NGUỒN 2: QUÉT STOCKTAKE ---
-  if (stocktakeSheet) {
-    const stockSchemaName = schemaMap["STOCKTAKE"] ? "STOCKTAKE" : (schemaMap["STOCK_TAKE"] ? "STOCK_TAKE" : "");
-    if (stockSchemaName) {
-      const colStockItem = schemaGetColIndex(schemaMap, stockSchemaName, "item_code");
-      if (colStockItem !== -1) {
-        const stockData = stocktakeSheet.getDataRange().getValues();
-        for (let i = 1; i < stockData.length; i++) {
-          const itemVal = cleanCodeValue_(stockData[i][colStockItem]);
-          if (itemVal && !itemVal.toLowerCase().includes("unmapped")) {
-            validItemCodes.add(itemVal);
+        // Cache theo cặp (from_code -> to_code)
+        if (colFromType !== -1 && colToType !== -1) {
+          const fT = cleanCodeValue_(routeData[i][colFromType]).toUpperCase();
+          const tT = cleanCodeValue_(routeData[i][colToType]).toUpperCase();
+          if (fT && tT) {
+            routeInventoryPairMap.set(`${fT}->${tT}`, isStock);
           }
         }
       }
     }
   }
 
-  if (validItemCodes.size === 0) {
-    ui.alert("ℹ️ Thông báo", "Không tìm thấy mã SKU nào từ TRANSACTION hoặc STOCKTAKE.", ui.ButtonSet.OK);
-    return;
-  }
+  // Cache LOCATION_MAP (Code -> Type)
+  const locationTypeMap = new Map();
+  const locSheetName = schemaGetSheetName(schemaMap, "LOCATION_MAP");
+  const locSheet = locSheetName ? ss.getSheetByName(locSheetName) : null;
 
-  // 2. Đọc MAPPING để lấy Tên chuẩn (item_name) tương ứng với từng SKU
-  const colMapItemName = schemaGetColIndex(schemaMap, "MAPPING", "item_name");
-  const colMapItemCode = schemaGetColIndex(schemaMap, "MAPPING", "item_code");
+  if (locSheet) {
+    const colLocCode = schemaGetColIndex(schemaMap, "LOCATION_MAP", "location_code");
+    const colLocType = schemaGetColIndex(schemaMap, "LOCATION_MAP", "location_type");
 
-  if (colMapItemCode === -1) {
-    ui.alert("⚠️ Lỗi Schema MAPPING", "Thiếu cột item_code trong SCHEMA của MAPPING!", ui.ButtonSet.OK);
-    return;
-  }
-
-  const mappingData = mappingSheet.getDataRange().getValues();
-  const mappingNameByCode = new Map();
-  for (let i = 1; i < mappingData.length; i++) {
-    const row = mappingData[i];
-    const code = cleanCodeValue_(row[colMapItemCode]);
-    const name = colMapItemName !== -1 ? cleanCodeValue_(row[colMapItemName]) : "";
-
-    if (code) {
-      mappingNameByCode.set(code, name || code);
+    if (colLocCode !== -1 && colLocType !== -1) {
+      const locData = locSheet.getDataRange().getValues();
+      for (let i = 1; i < locData.length; i++) {
+        const code = cleanCodeValue_(locData[i][colLocCode]).toUpperCase();
+        const type = cleanCodeValue_(locData[i][colLocType]).toUpperCase();
+        if (code) locationTypeMap.set(code, type);
+      }
     }
   }
 
-  // 3. Tra cứu vị trí cột động trong ITEM_MASTER
-  const idxMasterCode = schemaGetColIndex(schemaMap, "ITEM_MASTER", "item_code");
-  const idxMasterName = schemaGetColIndex(schemaMap, "ITEM_MASTER", "item_name");
+  // Hàm tra cứu siêu tốc O(1) ngay trên bộ nhớ RAM
+  const fastCheckIsStockRoute = (fromCode, toCode) => {
+    if (!fromCode || !toCode) return false;
+    const fUpper = cleanCodeValue_(fromCode).toUpperCase();
+    const tUpper = cleanCodeValue_(toCode).toUpperCase();
+
+    const fromType = locationTypeMap.get(fUpper) || fUpper;
+    const toType   = locationTypeMap.get(tUpper) || tUpper;
+
+    if (fromType === "EXPENSE" || toType === "EXPENSE") return false;
+    if (fromType === "VIRTUAL" && toType === "VIRTUAL") return false;
+
+    const pairKey = `${fromType}->${toType}`;
+    return routeInventoryPairMap.has(pairKey) ? routeInventoryPairMap.get(pairKey) : false;
+  };
+
+  // -------------------------------------------------------------
+  // 2. LẤY SCHEMA THUỘC NHÓM INVENTORY
+  // -------------------------------------------------------------
+  const sourceGroupMap = getSourceGroupMap_(schemaMap, ss);
+  const inventorySchemas = new Set();
+
+  Object.keys(schemaMap).forEach(schemaName => {
+    const sGroup = sourceGroupMap.get(schemaName.toLowerCase());
+    if (sGroup === "inventory") inventorySchemas.add(schemaName);
+  });
+
+  if (inventorySchemas.size === 0) {
+    inventorySchemas.add("TRANSACTION");
+    inventorySchemas.add("STOCKTAKE");
+  }
+
+  // -------------------------------------------------------------
+  // 3. QUÉT SKU TRONG BỘ NHỚ
+  // -------------------------------------------------------------
+  const validItemCodes = new Set();
+
+  inventorySchemas.forEach(schemaName => {
+    const colItem  = schemaGetColIndex(schemaMap, schemaName, "item_code");
+    const colRoute = schemaGetColIndex(schemaMap, schemaName, "route_code");
+    const colFrom  = schemaGetColIndex(schemaMap, schemaName, "from_code");
+    const colTo    = schemaGetColIndex(schemaMap, schemaName, "to_code");
+
+    const targetSheetName = schemaGetSheetName(schemaMap, schemaName);
+    const targetSheet = targetSheetName ? ss.getSheetByName(targetSheetName) : null;
+
+    if (colItem !== -1 && targetSheet) {
+      const data = targetSheet.getDataRange().getValues();
+      for (let i = 1; i < data.length; i++) {
+        const itemVal = cleanCodeValue_(data[i][colItem]);
+        
+        if (itemVal && !itemVal.toLowerCase().includes("unmapped")) {
+          let isStockCalculated = false;
+
+          const routeCode = colRoute !== -1 ? cleanCodeValue_(data[i][colRoute]) : "";
+          const fCode     = colFrom !== -1 ? cleanCodeValue_(data[i][colFrom]) : "";
+          const tCode     = colTo !== -1 ? cleanCodeValue_(data[i][colTo]) : "";
+
+          if (routeCode) {
+            isStockCalculated = validStockRoutes.has(routeCode);
+          } else if (fCode && tCode) {
+            isStockCalculated = fastCheckIsStockRoute(fCode, tCode);
+          } else {
+            isStockCalculated = true; // Stocktake
+          }
+
+          if (isStockCalculated) {
+            validItemCodes.add(itemVal);
+          }
+        }
+      }
+    }
+  });
+
+  // -------------------------------------------------------------
+  // 4. LẤY MAPPING VÀ CẬP NHẬT ITEM_MASTER
+  // -------------------------------------------------------------
+  const colMapItemName = schemaGetColIndex(schemaMap, "MAPPING", "item_name");
+  const colMapItemCode = schemaGetColIndex(schemaMap, "MAPPING", "item_code");
+
+  const mappingNameByCode = new Map();
+  if (colMapItemCode !== -1) {
+    const mappingData = mappingSheet.getDataRange().getValues();
+    for (let i = 1; i < mappingData.length; i++) {
+      const code = cleanCodeValue_(mappingData[i][colMapItemCode]);
+      const name = colMapItemName !== -1 ? cleanCodeValue_(mappingData[i][colMapItemName]) : "";
+      if (code) mappingNameByCode.set(code, name || code);
+    }
+  }
+
+  const idxMasterCode   = schemaGetColIndex(schemaMap, "ITEM_MASTER", "item_code");
+  const idxMasterName   = schemaGetColIndex(schemaMap, "ITEM_MASTER", "item_name");
+  const idxMasterSource = schemaGetColIndex(schemaMap, "ITEM_MASTER", "source_group");
 
   if (idxMasterCode === -1 || idxMasterName === -1) {
-    ui.alert("⚠️ Lỗi Schema ITEM_MASTER", "Mã cột 'item_code' hoặc 'item_name' không tồn tại trong SCHEMA của ITEM_MASTER!", ui.ButtonSet.OK);
+    ui.alert("⚠️ Lỗi Schema ITEM_MASTER", "Thiếu cột 'item_code' hoặc 'item_name'!", ui.ButtonSet.OK);
     return;
   }
 
@@ -126,12 +193,21 @@ function runSyncItemMasterFromInventoryAndStocktake() {
   const maxMasterColCount = schemaMap["ITEM_MASTER"].columns.length;
 
   const existingMasterSkus = new Set();
+  let updatedExistingCount = 0;
+
   for (let i = 1; i < masterData.length; i++) {
     const sku = cleanCodeValue_(masterData[i][idxMasterCode]);
-    if (sku) existingMasterSkus.add(sku);
+    if (sku) {
+      existingMasterSkus.add(sku);
+      if (idxMasterSource !== -1 && !masterData[i][idxMasterSource]) {
+        if (validItemCodes.has(sku)) {
+          masterData[i][idxMasterSource] = "INVENTORY";
+          updatedExistingCount++;
+        }
+      }
+    }
   }
 
-  // 4. Lọc và chuẩn bị danh sách dòng mới
   const rowsToAdd = [];
   const processedSkus = new Set();
 
@@ -140,55 +216,50 @@ function runSyncItemMasterFromInventoryAndStocktake() {
       processedSkus.add(skuCode);
       
       const finalItemName = mappingNameByCode.get(skuCode) || skuCode;
-
-      // Tạo dòng mới có số cột tương ứng cấu trúc schema ITEM_MASTER
       const newRow = new Array(maxMasterColCount).fill("");
       newRow[idxMasterCode] = skuCode;
       newRow[idxMasterName] = finalItemName;
-
+      
+      if (idxMasterSource !== -1) newRow[idxMasterSource] = "INVENTORY";
       rowsToAdd.push(newRow);
     }
   });
 
-  if (rowsToAdd.length === 0) {
-    ui.alert("ℹ️ Thông báo", "Tất cả các mã SKU quét được đều đã có sẵn trong ITEM_MASTER.", ui.ButtonSet.OK);
-    return;
+  if (updatedExistingCount > 0) {
+    itemMasterSheet.getRange(1, 1, masterData.length, maxMasterColCount).setValues(masterData);
   }
 
-  // 5. Ghi dữ liệu xuống ITEM_MASTER đúng vị trí các cột
-  const lastRow = itemMasterSheet.getLastRow();
-  itemMasterSheet.getRange(lastRow + 1, 1, rowsToAdd.length, maxMasterColCount).setValues(rowsToAdd);
+  if (rowsToAdd.length > 0) {
+    const lastRow = itemMasterSheet.getLastRow();
+    itemMasterSheet.getRange(lastRow + 1, 1, rowsToAdd.length, maxMasterColCount).setValues(rowsToAdd);
+  }
 
-  ui.alert("✅ Thành công", `Đã đồng bộ thành công ${rowsToAdd.length} mã SKU mới (với Mã SKU & Tên chuẩn) vào ITEM_MASTER!`, ui.ButtonSet.OK);
+  let msg = [];
+  if (rowsToAdd.length > 0) msg.push(`Đã thêm mới ${rowsToAdd.length} SKU vào ITEM_MASTER`);
+  if (updatedExistingCount > 0) msg.push(`Đã bổ sung Nhóm nguồn = 'INVENTORY' cho ${updatedExistingCount} SKU cũ`);
+
+  if (msg.length === 0) {
+    ui.alert("ℹ️ Thông báo", "Tất cả các mã SKU trong ITEM_MASTER đã đầy đủ.", ui.ButtonSet.OK);
+  } else {
+    ui.alert("✅ Thành công", msg.join("\n"), ui.ButtonSet.OK);
+  }
 }
 
 /**
- * Entry Point gọi từ Menu UI để đồng bộ danh mục món từ MENU sang ITEM_MASTER.
- * Quy tắc: [actionEntityDescription] -> runSyncItemMasterFromMenu
- */
-function runSyncItemMasterFromMenu() {
-  itemMasterSyncFromMenu();
-}
-
-/**
- * Hàm Global Core nghiệp vụ đồng bộ MENU -> ITEM_MASTER.
- * - Khóa PK đồng bộ chính là menu_code.
- * - Lọc bỏ item_type = "Dịch vụ".
- * - Tham chiếu 100% qua SCHEMA.
- * Quy tắc: [moduleName][Action][Entity] -> itemMasterSyncFromMenu
+ * Core: Đồng bộ MENU -> ITEM_MASTER.
+ * - Thêm mới SKU với source_group = "SALES".
+ * - Bổ sung source_group cho các dòng cũ từ Menu nếu đang để trống.
  */
 function itemMasterSyncFromMenu() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const ui = SpreadsheetApp.getUi();
 
-  // 1. Lấy cấu trúc SCHEMA chuẩn hóa từ SchemaCore
   const schemaMap = schemaGetMap();
   if (!schemaMap) {
     ui.alert("⚠️ Lỗi Schema", "Không thể đọc hoặc cấu trúc sheet SCHEMA không hợp lệ!", ui.ButtonSet.OK);
     return;
   }
 
-  // Lấy sheet_name vật lý động từ SCHEMA
   const menuSheetName       = schemaGetSheetName(schemaMap, "MENU");
   const itemMasterSheetName = schemaGetSheetName(schemaMap, "ITEM_MASTER");
 
@@ -200,7 +271,6 @@ function itemMasterSyncFromMenu() {
     return;
   }
 
-  // 2. Tra cứu cột trong MENU via SCHEMA
   const colMenuCode     = schemaGetColIndex(schemaMap, "MENU", "menu_code");
   const colMenuName     = schemaGetColIndex(schemaMap, "MENU", "menu_name");
   const colMenuItemType = schemaGetColIndex(schemaMap, "MENU", "item_type");
@@ -210,9 +280,8 @@ function itemMasterSyncFromMenu() {
     return;
   }
 
-  // 3. Đọc dữ liệu MENU và lọc mã hợp lệ (Dùng menu_code làm Mã SKU chính trong ITEM_MASTER)
   const menuData = menuSheet.getDataRange().getValues();
-  const validMenuItems = new Map(); // Key: menu_code, Value: menu_name
+  const validMenuItems = new Map();
 
   for (let i = 1; i < menuData.length; i++) {
     const row = menuData[i];
@@ -220,10 +289,7 @@ function itemMasterSyncFromMenu() {
     const menuName = cleanCodeValue_(row[colMenuName]);
     const itemType = cleanCodeValue_(row[colMenuItemType]);
 
-    // Lọc bỏ mã rỗng, unmapped
     if (!menuCode || menuCode.toLowerCase().includes("unmapped")) continue;
-
-    // LOẠI TRỪ: Bỏ qua item_type = "Dịch vụ"
     if (itemType.toLowerCase() === "dịch vụ" || itemType.toLowerCase() === "dich vu") continue;
 
     validMenuItems.set(menuCode, menuName || menuCode);
@@ -234,9 +300,9 @@ function itemMasterSyncFromMenu() {
     return;
   }
 
-  // 4. Tra cứu vị trí cột động trong ITEM_MASTER via SCHEMA
-  const idxMasterSku  = schemaGetColIndex(schemaMap, "ITEM_MASTER", "item_code");
-  const idxMasterName = schemaGetColIndex(schemaMap, "ITEM_MASTER", "item_name");
+  const idxMasterSku    = schemaGetColIndex(schemaMap, "ITEM_MASTER", "item_code");
+  const idxMasterName   = schemaGetColIndex(schemaMap, "ITEM_MASTER", "item_name");
+  const idxMasterSource = schemaGetColIndex(schemaMap, "ITEM_MASTER", "source_group");
 
   if (idxMasterSku === -1 || idxMasterName === -1) {
     ui.alert("⚠️ Lỗi Schema ITEM_MASTER", "Thiếu cột item_code hoặc item_name trong SCHEMA của ITEM_MASTER!", ui.ButtonSet.OK);
@@ -247,33 +313,189 @@ function itemMasterSyncFromMenu() {
   const maxMasterColCount = schemaMap["ITEM_MASTER"].columns.length;
 
   const existingMasterSkus = new Set();
+  let updatedExistingCount = 0;
+
+  // Quét dòng cũ: Cập nhật source_group = "SALES" nếu chưa có
   for (let i = 1; i < masterData.length; i++) {
     const sku = cleanCodeValue_(masterData[i][idxMasterSku]);
-    if (sku) existingMasterSkus.add(sku);
+    if (sku) {
+      existingMasterSkus.add(sku);
+
+      if (validMenuItems.has(sku) && idxMasterSource !== -1) {
+        if (!masterData[i][idxMasterSource]) {
+          masterData[i][idxMasterSource] = "SALES";
+          updatedExistingCount++;
+        }
+      }
+    }
   }
 
-  // 5. Lọc và chuẩn bị mảng dữ liệu mới theo đúng kích thước schema ITEM_MASTER
   const rowsToAdd = [];
   validMenuItems.forEach((menuName, menuCode) => {
     if (!existingMasterSkus.has(menuCode)) {
       const newRow = new Array(maxMasterColCount).fill("");
-      newRow[idxMasterSku]  = menuCode; // Gán Mã SKU
-      newRow[idxMasterName] = menuName; // Gán Tên mặt hàng
+      newRow[idxMasterSku]  = menuCode;
+      newRow[idxMasterName] = menuName;
       
+      if (idxMasterSource !== -1) {
+        newRow[idxMasterSource] = "SALES";
+      }
+
       rowsToAdd.push(newRow);
     }
   });
 
-  if (rowsToAdd.length === 0) {
-    ui.alert("ℹ️ Thông báo", "Tất cả các Mã món từ MENU đều đã có sẵn trong ITEM_MASTER.", ui.ButtonSet.OK);
+  if (updatedExistingCount > 0) {
+    itemMasterSheet.getRange(1, 1, masterData.length, maxMasterColCount).setValues(masterData);
+  }
+
+  if (rowsToAdd.length > 0) {
+    const lastRow = itemMasterSheet.getLastRow();
+    itemMasterSheet.getRange(lastRow + 1, 1, rowsToAdd.length, maxMasterColCount).setValues(rowsToAdd);
+  }
+
+  let msg = [];
+  if (rowsToAdd.length > 0) msg.push(`Đã thêm mới ${rowsToAdd.length} Mã món (nguồn SALES)`);
+  if (updatedExistingCount > 0) msg.push(`Đã bổ sung source_group = 'SALES' cho ${updatedExistingCount} SKU cũ`);
+
+  if (msg.length === 0) {
+    ui.alert("ℹ️ Thông báo", "Tất cả các Mã món từ MENU đều đã đầy đủ thông tin.", ui.ButtonSet.OK);
+  } else {
+    ui.alert("✅ Thành công", msg.join("\n"), ui.ButtonSet.OK);
+  }
+}
+
+/**
+ * Core: Tự động gợi ý/điền danh mục (item_type, category, base_unit, default_storage) dựa trên ITEM_CLASSIFICATION
+ */
+function itemMasterAutoSuggestClassification() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const ui = SpreadsheetApp.getUi();
+
+  const schemaMap = schemaGetMap();
+  if (!schemaMap) {
+    ui.alert("⚠️ Lỗi Schema", "Không thể đọc cấu trúc sheet SCHEMA!", ui.ButtonSet.OK);
     return;
   }
 
-  // 6. Ghi dữ liệu xuống ITEM_MASTER đúng vị trí các cột theo SCHEMA
-  const lastRow = itemMasterSheet.getLastRow();
-  itemMasterSheet.getRange(lastRow + 1, 1, rowsToAdd.length, maxMasterColCount).setValues(rowsToAdd);
+  const masterSheetName = schemaGetSheetName(schemaMap, "ITEM_MASTER");
+  const ruleSchemaName  = schemaMap["ITEM_CLASSIFICATION"] ? "ITEM_CLASSIFICATION" : "ITEM_CLASSIFICATION_RULE";
+  const ruleSheetName   = schemaGetSheetName(schemaMap, ruleSchemaName);
 
-  ui.alert("✅ Thành công", `Đã đồng bộ thành công ${rowsToAdd.length} Mã món từ MENU sang ITEM_MASTER!`, ui.ButtonSet.OK);
+  const masterSheet = masterSheetName ? ss.getSheetByName(masterSheetName) : null;
+  const ruleSheet   = ruleSheetName ? ss.getSheetByName(ruleSheetName) : null;
+
+  if (!masterSheet || !ruleSheet) {
+    ui.alert("⚠️ Lỗi", "Không tìm thấy Sheet ITEM_MASTER hoặc ITEM_CLASSIFICATION!", ui.ButtonSet.OK);
+    return;
+  }
+
+  // 1. ĐỌC QUY TẮC PHÂN LOẠI TỪ SHEET ITEM_CLASSIFICATION
+  const idxRulePattern = schemaGetColIndex(schemaMap, ruleSchemaName, "item_name_pattern");
+  const idxRuleGroup   = schemaGetColIndex(schemaMap, ruleSchemaName, "target_source_group");
+  const idxRuleType    = schemaGetColIndex(schemaMap, ruleSchemaName, "item_type");
+  const idxRuleCat     = schemaGetColIndex(schemaMap, ruleSchemaName, "category");
+  const idxRuleUnit    = schemaGetColIndex(schemaMap, ruleSchemaName, "base_unit");
+  const idxRuleStorage = schemaGetColIndex(schemaMap, ruleSchemaName, "default_storage");
+  const idxRulePrio    = schemaGetColIndex(schemaMap, ruleSchemaName, "priority");
+
+  const ruleData = ruleSheet.getDataRange().getValues();
+  const rules = [];
+
+  for (let i = 1; i < ruleData.length; i++) {
+    const row = ruleData[i];
+    const patternStr  = idxRulePattern !== -1 && row[idxRulePattern] ? row[idxRulePattern].toString().trim() : "";
+    const sourceGroup = idxRuleGroup !== -1 && row[idxRuleGroup] ? row[idxRuleGroup].toString().trim().toUpperCase() : "ALL";
+    const itemType    = idxRuleType !== -1 && row[idxRuleType] ? row[idxRuleType].toString().trim() : "";
+    const category    = idxRuleCat !== -1 && row[idxRuleCat] ? row[idxRuleCat].toString().trim() : "";
+    const baseUnit    = idxRuleUnit !== -1 && row[idxRuleUnit] ? row[idxRuleUnit].toString().trim() : "";
+    const storage     = idxRuleStorage !== -1 && row[idxRuleStorage] ? row[idxRuleStorage].toString().trim() : "";
+    const priority    = idxRulePrio !== -1 && !isNaN(row[idxRulePrio]) ? Number(row[idxRulePrio]) : 999;
+
+    if (patternStr) {
+      const patterns = patternStr.split(",").map(p => p.trim()).filter(p => p);
+      rules.push({
+        regexes: patterns.map(p => patternToRegex_(p)),
+        sourceGroup: sourceGroup || "ALL",
+        itemType: itemType,
+        category: category,
+        baseUnit: baseUnit,
+        defaultStorage: storage,
+        priority: priority
+      });
+    }
+  }
+
+  // Sắp xếp ưu tiên (Priority số nhỏ áp dụng trước)
+  rules.sort((a, b) => a.priority - b.priority);
+
+  // 2. TRA CỨU CÁC CỘT CẦN ĐIỀN TRONG ITEM_MASTER
+  const idxMasterName    = schemaGetColIndex(schemaMap, "ITEM_MASTER", "item_name");
+  const idxMasterSource  = schemaGetColIndex(schemaMap, "ITEM_MASTER", "source_group");
+  const idxMasterType    = schemaGetColIndex(schemaMap, "ITEM_MASTER", "item_type");
+  const idxMasterCat     = schemaGetColIndex(schemaMap, "ITEM_MASTER", "category");
+  const idxMasterUnit    = schemaGetColIndex(schemaMap, "ITEM_MASTER", "base_unit");
+  const idxMasterStorage = schemaGetColIndex(schemaMap, "ITEM_MASTER", "default_storage");
+
+  if (idxMasterName === -1) {
+    ui.alert("⚠️ Lỗi Schema", "Chưa định nghĩa col_key 'item_name' trong SCHEMA cho ITEM_MASTER!", ui.ButtonSet.OK);
+    return;
+  }
+
+  const masterData = masterSheet.getDataRange().getValues();
+  let updatedCount = 0;
+
+  // 3. ĐỐI SOÁT QUY TẮC VÀ BỔ SUNG THUỘC TÍNH
+  for (let i = 1; i < masterData.length; i++) {
+    const itemName = masterData[i][idxMasterName] ? masterData[i][idxMasterName].toString().trim() : "";
+    const itemSource = (idxMasterSource !== -1 && masterData[i][idxMasterSource]) 
+                       ? masterData[i][idxMasterSource].toString().trim().toUpperCase() 
+                       : "";
+
+    if (!itemName) continue;
+
+    for (const rule of rules) {
+      // Lọc điều kiện Nhóm nguồn (Nếu quy tắc chỉ áp dụng riêng cho SALES hoặc INVENTORY)
+      if (rule.sourceGroup !== "ALL" && itemSource && rule.sourceGroup !== itemSource) {
+        continue;
+      }
+
+      const isMatched = rule.regexes.some(rx => rx.test(itemName));
+      if (isMatched) {
+        let isRowChanged = false;
+
+        if (idxMasterType !== -1 && !masterData[i][idxMasterType] && rule.itemType) {
+          masterData[i][idxMasterType] = rule.itemType;
+          isRowChanged = true;
+        }
+
+        if (idxMasterCat !== -1 && !masterData[i][idxMasterCat] && rule.category) {
+          masterData[i][idxMasterCat] = rule.category;
+          isRowChanged = true;
+        }
+
+        if (idxMasterUnit !== -1 && !masterData[i][idxMasterUnit] && rule.baseUnit) {
+          masterData[i][idxMasterUnit] = rule.baseUnit;
+          isRowChanged = true;
+        }
+
+        if (idxMasterStorage !== -1 && !masterData[i][idxMasterStorage] && rule.defaultStorage) {
+          masterData[i][idxMasterStorage] = rule.defaultStorage;
+          isRowChanged = true;
+        }
+
+        if (isRowChanged) updatedCount++;
+        break; // Áp dụng quy tắc ưu tiên đầu tiên khớp
+      }
+    }
+  }
+
+  // 4. GHI DỮ LIỆU ĐÃ PHÂN LOẠI XUỐNG SHEET
+  if (updatedCount > 0) {
+    const maxCols = schemaMap["ITEM_MASTER"].columns.length;
+    masterSheet.getRange(1, 1, masterData.length, maxCols).setValues(masterData);
+    ui.alert("✅ Hoàn thành", `Đã tự động phân loại thành công cho ${updatedCount} SKU trong ITEM_MASTER!`, ui.ButtonSet.OK);
+  } else {
+    ui.alert("ℹ️ Thông báo", "Không có SKU nào cần bổ sung phân loại mới.", ui.ButtonSet.OK);
+  }
 }
-
-

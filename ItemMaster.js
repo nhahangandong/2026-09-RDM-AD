@@ -368,9 +368,22 @@ function itemMasterSyncFromMenu() {
 /**
  * Core: Tự động gợi ý/điền danh mục (item_type, category, base_unit, default_storage) dựa trên ITEM_CLASSIFICATION
  */
+/**
+ * Core Logic API gợi ý phân loại tự động cho ITEM_MASTER và đồng bộ sang MENU
+ * Cú pháp: categoryActionEntity (Tiền tố 'itemMaster')
+ */
+/**
+ * Core Logic API gợi ý phân loại tự động cho ITEM_MASTER và đồng bộ sang MENU
+ * Cú pháp: categoryActionEntity (Tiền tố 'itemMaster')
+ */
 function itemMasterAutoSuggestClassification() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const ui = SpreadsheetApp.getUi();
+
+  // 🔴 CẤU HÌNH GHI ĐÈ:
+  // - set true:  Ghi đè lại dữ liệu phân loại theo quy tắc mới nhất (Ưu tiên sửa quy tắc nhanh)
+  // - set false: Chỉ điền vào các ô đang bị bỏ trống (Không làm mất dữ liệu đã sửa tay)
+  const FORCE_OVERWRITE = true; 
 
   const schemaMap = schemaGetMap();
   if (!schemaMap) {
@@ -379,10 +392,12 @@ function itemMasterAutoSuggestClassification() {
   }
 
   const masterSheetName = schemaGetSheetName(schemaMap, "ITEM_MASTER");
+  const menuSheetName   = schemaGetSheetName(schemaMap, "MENU");
   const ruleSchemaName  = schemaMap["ITEM_CLASSIFICATION"] ? "ITEM_CLASSIFICATION" : "ITEM_CLASSIFICATION_RULE";
   const ruleSheetName   = schemaGetSheetName(schemaMap, ruleSchemaName);
 
   const masterSheet = masterSheetName ? ss.getSheetByName(masterSheetName) : null;
+  const menuSheet   = menuSheetName ? ss.getSheetByName(menuSheetName) : null;
   const ruleSheet   = ruleSheetName ? ss.getSheetByName(ruleSheetName) : null;
 
   if (!masterSheet || !ruleSheet) {
@@ -429,7 +444,8 @@ function itemMasterAutoSuggestClassification() {
   // Sắp xếp ưu tiên (Priority số nhỏ áp dụng trước)
   rules.sort((a, b) => a.priority - b.priority);
 
-  // 2. TRA CỨU CÁC CỘT CẦN ĐIỀN TRONG ITEM_MASTER
+  // 2. TRA CỨU CÁC CỘT CẦN ĐIỀN TRONG ITEM_MASTER VÀ MENU
+  const idxMasterCode    = schemaGetColIndex(schemaMap, "ITEM_MASTER", "item_code");
   const idxMasterName    = schemaGetColIndex(schemaMap, "ITEM_MASTER", "item_name");
   const idxMasterSource  = schemaGetColIndex(schemaMap, "ITEM_MASTER", "source_group");
   const idxMasterType    = schemaGetColIndex(schemaMap, "ITEM_MASTER", "item_type");
@@ -437,17 +453,31 @@ function itemMasterAutoSuggestClassification() {
   const idxMasterUnit    = schemaGetColIndex(schemaMap, "ITEM_MASTER", "base_unit");
   const idxMasterStorage = schemaGetColIndex(schemaMap, "ITEM_MASTER", "default_storage");
 
-  if (idxMasterName === -1) {
-    ui.alert("⚠️ Lỗi Schema", "Chưa định nghĩa col_key 'item_name' trong SCHEMA cho ITEM_MASTER!", ui.ButtonSet.OK);
+  if (idxMasterName === -1 || idxMasterCode === -1) {
+    ui.alert("⚠️ Lỗi Schema ITEM_MASTER", "Chưa định nghĩa col_key 'item_code' hoặc 'item_name' trong SCHEMA!", ui.ButtonSet.OK);
     return;
   }
 
-  const masterData = masterSheet.getDataRange().getValues();
-  let updatedCount = 0;
+  // Khai báo vị trí cột bên MENU
+  let idxMenuCode = -1, idxMenuType = -1, idxMenuCat = -1;
+  let menuData = [], menuUpdatesMap = new Map(); // menuCode -> { itemType, category }
 
-  // 3. ĐỐI SOÁT QUY TẮC VÀ BỔ SUNG THUỘC TÍNH
+  if (menuSheet) {
+    idxMenuCode = schemaGetColIndex(schemaMap, "MENU", "menu_code");
+    idxMenuType = schemaGetColIndex(schemaMap, "MENU", "item_type");
+    idxMenuCat  = schemaGetColIndex(schemaMap, "MENU", "category");
+    if (idxMenuCode !== -1) {
+      menuData = menuSheet.getDataRange().getValues();
+    }
+  }
+
+  const masterData = masterSheet.getDataRange().getValues();
+  let updatedMasterCount = 0;
+
+  // 3. ĐỐI SOÁT QUY TẮC VÀ BỔ SUNG THUỘC TÍNH CHO ITEM_MASTER
   for (let i = 1; i < masterData.length; i++) {
-    const itemName = masterData[i][idxMasterName] ? masterData[i][idxMasterName].toString().trim() : "";
+    const itemCode   = masterData[i][idxMasterCode] ? masterData[i][idxMasterCode].toString().trim() : "";
+    const itemName   = masterData[i][idxMasterName] ? masterData[i][idxMasterName].toString().trim() : "";
     const itemSource = (idxMasterSource !== -1 && masterData[i][idxMasterSource]) 
                        ? masterData[i][idxMasterSource].toString().trim().toUpperCase() 
                        : "";
@@ -455,7 +485,6 @@ function itemMasterAutoSuggestClassification() {
     if (!itemName) continue;
 
     for (const rule of rules) {
-      // Lọc điều kiện Nhóm nguồn (Nếu quy tắc chỉ áp dụng riêng cho SALES hoặc INVENTORY)
       if (rule.sourceGroup !== "ALL" && itemSource && rule.sourceGroup !== itemSource) {
         continue;
       }
@@ -464,38 +493,112 @@ function itemMasterAutoSuggestClassification() {
       if (isMatched) {
         let isRowChanged = false;
 
-        if (idxMasterType !== -1 && !masterData[i][idxMasterType] && rule.itemType) {
-          masterData[i][idxMasterType] = rule.itemType;
-          isRowChanged = true;
+        // Cập nhật item_type (Ghi đè nếu FORCE_OVERWRITE = true hoặc ô đang trống)
+        if (idxMasterType !== -1 && rule.itemType) {
+          if (FORCE_OVERWRITE || !masterData[i][idxMasterType]) {
+            if (masterData[i][idxMasterType] !== rule.itemType) {
+              masterData[i][idxMasterType] = rule.itemType;
+              isRowChanged = true;
+            }
+          }
         }
 
-        if (idxMasterCat !== -1 && !masterData[i][idxMasterCat] && rule.category) {
-          masterData[i][idxMasterCat] = rule.category;
-          isRowChanged = true;
+        // Cập nhật category (Ghi đè nếu FORCE_OVERWRITE = true hoặc ô đang trống)
+        if (idxMasterCat !== -1 && rule.category) {
+          if (FORCE_OVERWRITE || !masterData[i][idxMasterCat]) {
+            if (masterData[i][idxMasterCat] !== rule.category) {
+              masterData[i][idxMasterCat] = rule.category;
+              isRowChanged = true;
+            }
+          }
         }
 
-        if (idxMasterUnit !== -1 && !masterData[i][idxMasterUnit] && rule.baseUnit) {
-          masterData[i][idxMasterUnit] = rule.baseUnit;
-          isRowChanged = true;
+        // Cập nhật base_unit
+        if (idxMasterUnit !== -1 && rule.baseUnit) {
+          if (FORCE_OVERWRITE || !masterData[i][idxMasterUnit]) {
+            if (masterData[i][idxMasterUnit] !== rule.baseUnit) {
+              masterData[i][idxMasterUnit] = rule.baseUnit;
+              isRowChanged = true;
+            }
+          }
         }
 
-        if (idxMasterStorage !== -1 && !masterData[i][idxMasterStorage] && rule.defaultStorage) {
-          masterData[i][idxMasterStorage] = rule.defaultStorage;
-          isRowChanged = true;
+        // Cập nhật default_storage
+        if (idxMasterStorage !== -1 && rule.defaultStorage) {
+          if (FORCE_OVERWRITE || !masterData[i][idxMasterStorage]) {
+            if (masterData[i][idxMasterStorage] !== rule.defaultStorage) {
+              masterData[i][idxMasterStorage] = rule.defaultStorage;
+              isRowChanged = true;
+            }
+          }
         }
 
-        if (isRowChanged) updatedCount++;
-        break; // Áp dụng quy tắc ưu tiên đầu tiên khớp
+        if (isRowChanged) updatedMasterCount++;
+
+        // Lưu thông tin quy tắc đã khớp để đồng bộ sang MENU
+        if (itemCode && (rule.itemType || rule.category)) {
+          menuUpdatesMap.set(itemCode, {
+            itemType: rule.itemType,
+            category: rule.category
+          });
+        }
+
+        break; // Dừng lại ở quy tắc khớp có Priority nhỏ nhất
       }
     }
   }
 
-  // 4. GHI DỮ LIỆU ĐÃ PHÂN LOẠI XUỐNG SHEET
-  if (updatedCount > 0) {
-    const maxCols = schemaMap["ITEM_MASTER"].columns.length;
-    masterSheet.getRange(1, 1, masterData.length, maxCols).setValues(masterData);
-    ui.alert("✅ Hoàn thành", `Đã tự động phân loại thành công cho ${updatedCount} SKU trong ITEM_MASTER!`, ui.ButtonSet.OK);
+  // 4. BỔ SUNG HOẶC GHI ĐỀ PHÂN LOẠI SANG SHEET MENU
+  let updatedMenuCount = 0;
+  if (menuSheet && idxMenuCode !== -1 && menuUpdatesMap.size > 0) {
+    for (let i = 1; i < menuData.length; i++) {
+      const code = menuData[i][idxMenuCode] ? menuData[i][idxMenuCode].toString().trim() : "";
+      if (code && menuUpdatesMap.has(code)) {
+        const suggestion = menuUpdatesMap.get(code);
+        let isMenuRowChanged = false;
+
+        if (idxMenuType !== -1 && suggestion.itemType) {
+          if (FORCE_OVERWRITE || !menuData[i][idxMenuType]) {
+            if (menuData[i][idxMenuType] !== suggestion.itemType) {
+              menuData[i][idxMenuType] = suggestion.itemType;
+              isMenuRowChanged = true;
+            }
+          }
+        }
+
+        if (idxMenuCat !== -1 && suggestion.category) {
+          if (FORCE_OVERWRITE || !menuData[i][idxMenuCat]) {
+            if (menuData[i][idxMenuCat] !== suggestion.category) {
+              menuData[i][idxMenuCat] = suggestion.category;
+              isMenuRowChanged = true;
+            }
+          }
+        }
+
+        if (isMenuRowChanged) updatedMenuCount++;
+      }
+    }
+  }
+
+  // 5. GHI DỮ LIỆU ĐÃ PHÂN LOẠI XUỐNG CÁC SHEET
+  if (updatedMasterCount > 0) {
+    const maxMasterCols = schemaMap["ITEM_MASTER"].columns.length;
+    masterSheet.getRange(1, 1, masterData.length, maxMasterCols).setValues(masterData);
+  }
+
+  if (updatedMenuCount > 0) {
+    const maxMenuCols = schemaMap["MENU"].columns.length;
+    menuSheet.getRange(1, 1, menuData.length, maxMenuCols).setValues(menuData);
+  }
+
+  // 6. THÔNG BÁO KẾT QUẢ
+  const msg = [];
+  if (updatedMasterCount > 0) msg.push(`Đã cập nhật/ghi đè ${updatedMasterCount} SKU trong ITEM_MASTER.`);
+  if (updatedMenuCount > 0) msg.push(`Đã đồng bộ/ghi đè phân loại cho ${updatedMenuCount} món trong MENU.`);
+
+  if (msg.length === 0) {
+    ui.alert("ℹ️ Thông báo", "Không có thay đổi nào được thực hiện.", ui.ButtonSet.OK);
   } else {
-    ui.alert("ℹ️ Thông báo", "Không có SKU nào cần bổ sung phân loại mới.", ui.ButtonSet.OK);
+    ui.alert("✅ Hoàn thành", msg.join("\n"), ui.ButtonSet.OK);
   }
 }

@@ -172,3 +172,272 @@ function generateCompositeKey_(transNo, lineNo, itemCode) {
   
   return `${cleanTransNo}_${cleanLine}_${cleanCode}`;
 }
+
+
+/**
+ * ============================================================================
+ * MODULE: TransactionEngine.gs
+ * MỤC ĐÍCH: Tra cứu ITEM_MASTER, LOCATION_MAP, ROUTE_MAP để tự động tính toán
+ *           và gán Category, ĐVT, Kỳ HT, Số lượng/Đơn giá chuẩn cho các sheet.
+ * ============================================================================
+ */
+
+function transactionFillCalculatedColumnsAllSheets() {
+  // CỜ CẤU HÌNH CỤC BỘ: true = cho phép cập nhật/đè lại cột Category sau mỗi lần chạy.
+  // Chuyển sang false khi hệ thống đã chuẩn hóa xong nhóm dữ liệu.
+  const ENABLE_CATEGORY_UPDATE = true;
+
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const schemaMap = schemaGetMap();
+  if (!schemaMap) throw new Error("Không thể tải cấu trúc Schema Map.");
+  const tz = ss.getSpreadsheetTimeZone() || "GMT+7";
+
+  // --------------------------------------------------------------------------
+  // 1. NẠP ITEM_MASTER (item_code -> {base_unit, category})
+  // --------------------------------------------------------------------------
+  const SCHEMA_ITEM = "ITEM_MASTER";
+  const sheetNameItem = schemaGetSheetName(schemaMap, SCHEMA_ITEM);
+  const sItem = ss.getSheetByName(sheetNameItem);
+  const mapItemMaster = {};
+
+  if (sItem) {
+    const dataItem = sItem.getDataRange().getValues();
+    const idxItemCode = schemaGetColIndex(schemaMap, SCHEMA_ITEM, "item_code");
+    const idxBaseUnit = schemaGetColIndex(schemaMap, SCHEMA_ITEM, "base_unit");
+    const idxCategory = schemaGetColIndex(schemaMap, SCHEMA_ITEM, "category");
+
+    for (let i = 1; i < dataItem.length; i++) {
+      const row = dataItem[i];
+      const code = cleanCodeValue_(row[idxItemCode]);
+      if (code) {
+        mapItemMaster[code] = {
+          base_unit: String(row[idxBaseUnit] || "").trim(),
+          category: String(row[idxCategory] || "").trim()
+        };
+      }
+    }
+  }
+
+  // --------------------------------------------------------------------------
+  // 2. NẠP LOCATION_MAP (location_code -> location_type)
+  // --------------------------------------------------------------------------
+  const SCHEMA_LOC = "LOCATION_MAP";
+  const sheetNameLoc = schemaGetSheetName(schemaMap, SCHEMA_LOC);
+  const sLoc = ss.getSheetByName(sheetNameLoc);
+  const mapLocation = {};
+
+  if (sLoc) {
+    const dataLoc = sLoc.getDataRange().getValues();
+    const idxLocCode = schemaGetColIndex(schemaMap, SCHEMA_LOC, "location_code");
+    const idxLocType = schemaGetColIndex(schemaMap, SCHEMA_LOC, "location_type");
+
+    for (let i = 1; i < dataLoc.length; i++) {
+      const row = dataLoc[i];
+      const code = idxLocCode !== -1 ? cleanCodeValue_(row[idxLocCode]) : "";
+      const locType = idxLocType !== -1 ? String(row[idxLocType] || "").trim().toUpperCase() : "";
+      if (code) {
+        mapLocation[code] = { type: locType };
+      }
+    }
+  }
+
+  // --------------------------------------------------------------------------
+  // 3. NẠP ROUTE_MAP (from_code + to_code -> trans_type)
+  // --------------------------------------------------------------------------
+  const SCHEMA_ROUTE = "ROUTE_MAP";
+  const sheetNameRoute = schemaGetSheetName(schemaMap, SCHEMA_ROUTE);
+  const sRoute = ss.getSheetByName(sheetNameRoute);
+  const mapRoute = {};
+
+  if (sRoute) {
+    const dataRoute = sRoute.getDataRange().getValues();
+    const idxRouteFrom = schemaGetColIndex(schemaMap, SCHEMA_ROUTE, "from_code");
+    const idxRouteTo = schemaGetColIndex(schemaMap, SCHEMA_ROUTE, "to_code");
+    const idxTransType = schemaGetColIndex(schemaMap, SCHEMA_ROUTE, "trans_type");
+
+    for (let i = 1; i < dataRoute.length; i++) {
+      const row = dataRoute[i];
+      const fCode = idxRouteFrom !== -1 ? cleanCodeValue_(row[idxRouteFrom]) : "";
+      const tCode = idxRouteTo !== -1 ? cleanCodeValue_(row[idxRouteTo]) : "";
+      const tType = idxTransType !== -1 ? String(row[idxTransType] || "").trim().toUpperCase() : "";
+      
+      if (fCode && tCode) {
+        mapRoute[`${fCode}_${tCode}`] = tType;
+      }
+    }
+  }
+
+  // --------------------------------------------------------------------------
+  // 4. XỬ LÝ SHEET TRANSACTION
+  // --------------------------------------------------------------------------
+  const SCHEMA_TRANS = "TRANSACTION";
+  const sheetNameTrans = schemaGetSheetName(schemaMap, SCHEMA_TRANS);
+  const sTrans = ss.getSheetByName(sheetNameTrans);
+
+  if (sTrans) {
+    const dataTrans = sTrans.getDataRange().getValues();
+    if (dataTrans.length > 1) {
+      const headers = dataTrans[0].map(h => String(h).trim().toLowerCase());
+      const getIdxT = (colKey) => schemaGetColIndex(schemaMap, SCHEMA_TRANS, colKey);
+
+      let idxDate = getIdxT("trans_date");
+      if (idxDate === -1) idxDate = getIdxT("date");
+      if (idxDate === -1) idxDate = headers.findIndex(h => h.includes("ngày"));
+
+      let idxPeriod = getIdxT("period");
+      if (idxPeriod === -1) idxPeriod = headers.findIndex(h => h.includes("kỳ"));
+
+      let idxFromCode = getIdxT("from_code");
+      if (idxFromCode === -1) idxFromCode = headers.findIndex(h => h.includes("nơi xuất") || h.includes("nguồn"));
+
+      let idxToCode = getIdxT("to_code");
+      if (idxToCode === -1) idxToCode = headers.findIndex(h => h.includes("nơi nhận") || h.includes("đích"));
+
+      const idxItemCode = getIdxT("item_code");
+      const idxQty = getIdxT("quantity");
+      const idxFactor = getIdxT("conversion_factor") !== -1 ? getIdxT("conversion_factor") : getIdxT("factor");
+      const idxTotalAmt = getIdxT("total_amount");
+      const idxTaxRate = getIdxT("tax_rate");
+      const idxUnit = getIdxT("input_unit") !== -1 ? getIdxT("input_unit") : getIdxT("unit");
+
+      const idxBaseQty = getIdxT("base_quantity");
+      const idxBaseUnit = getIdxT("base_unit");
+      const idxNetAmt = getIdxT("net_amount");
+      const idxTaxAmt = getIdxT("tax_amount");
+      const idxUnitPrice = getIdxT("unit_price");
+      const idxNetUnitPrice = getIdxT("net_unit_price");
+
+      let idxCat = getIdxT("category");
+      if (idxCat === -1) idxCat = headers.findIndex(h => h.includes("nhóm") || h.includes("phân loại"));
+
+      for (let i = 1; i < dataTrans.length; i++) {
+        const row = dataTrans[i];
+        const rawDate = idxDate !== -1 ? row[idxDate] : null;
+
+        // Điền Kỳ HT (YYYY-MM)
+        if (idxPeriod !== -1 && rawDate) {
+          row[idxPeriod] = parsePeriod_(rawDate, tz);
+        }
+
+        const fromCode = idxFromCode !== -1 ? cleanCodeValue_(row[idxFromCode]) : "";
+        const toCode = idxToCode !== -1 ? cleanCodeValue_(row[idxToCode]) : "";
+        const itemCode = idxItemCode !== -1 ? cleanCodeValue_(row[idxItemCode]) : "";
+        
+        const qty = idxQty !== -1 ? (Number(row[idxQty]) || 0) : 0;
+        const rawFactor = idxFactor !== -1 ? row[idxFactor] : null;
+        const factor = (rawFactor !== "" && rawFactor !== null && !isNaN(rawFactor) && Number(rawFactor) > 0) ? Number(rawFactor) : 1;
+        const totalAmt = idxTotalAmt !== -1 ? (Number(row[idxTotalAmt]) || 0) : 0;
+        const taxRate = idxTaxRate !== -1 ? (Number(row[idxTaxRate]) || 0) : 0;
+        const rawUnit = idxUnit !== -1 ? String(row[idxUnit] || "").trim() : "";
+
+        const master = mapItemMaster[itemCode];
+        const toLocInfo = mapLocation[toCode];
+        const routeTransType = mapRoute[`${fromCode}_${toCode}`] || "";
+
+        // Gán ĐVT quy đổi chuẩn
+        if (idxBaseUnit !== -1) {
+          row[idxBaseUnit] = (master && master.base_unit) ? master.base_unit : rawUnit;
+        }
+
+        // --- CƠ CHẾ GÁN CATEGORY CHO TRANSACTION ---
+        if (idxCat !== -1) {
+          const currentCat = String(row[idxCat] || "").trim();
+
+          if (ENABLE_CATEGORY_UPDATE || !currentCat) {
+            // Kiểm tra Tuyến Chi phí (Nơi nhận CP_*, location_type = EXPENSE, hoặc trans_type = EXPENSE)
+            const isExpenseRoute = toCode.startsWith("CP_") || 
+                                   (toLocInfo && toLocInfo.type === "EXPENSE") || 
+                                   (routeTransType === "EXPENSE");
+
+            if (isExpenseRoute) {
+              row[idxCat] = "CHI PHÍ / DỊCH VỤ";
+            } else if (master && master.category) {
+              row[idxCat] = master.category;
+            } else {
+              row[idxCat] = "Chưa phân nhóm";
+            }
+          }
+        }
+
+        // Tính toán các thông số tài chính & số lượng quy đổi
+        if (idxBaseQty !== -1) row[idxBaseQty] = qty * factor;
+
+        const netAmt = taxRate > 0 ? totalAmt / (1 + taxRate) : totalAmt;
+        const taxAmt = totalAmt - netAmt;
+        if (idxNetAmt !== -1) row[idxNetAmt] = netAmt;
+        if (idxTaxAmt !== -1) row[idxTaxAmt] = taxAmt;
+
+        if (idxUnitPrice !== -1) row[idxUnitPrice] = qty > 0 ? totalAmt / qty : 0;
+        if (idxNetUnitPrice !== -1) row[idxNetUnitPrice] = qty > 0 ? netAmt / qty : 0;
+      }
+
+      sTrans.getRange(1, 1, dataTrans.length, dataTrans[0].length).setValues(dataTrans);
+    }
+  }
+
+  // --------------------------------------------------------------------------
+  // 5. XỬ LÝ SHEET STOCKTAKE (Tồn kho thuần túy)
+  // --------------------------------------------------------------------------
+  const SCHEMA_STOCK = "STOCKTAKE";
+  const sheetNameStock = schemaGetSheetName(schemaMap, SCHEMA_STOCK);
+  const sStock = ss.getSheetByName(sheetNameStock);
+
+  if (sStock) {
+    const dataStock = sStock.getDataRange().getValues();
+    if (dataStock.length > 1) {
+      const headers = dataStock[0].map(h => String(h).trim().toLowerCase());
+      const getIdxS = (colKey) => schemaGetColIndex(schemaMap, SCHEMA_STOCK, colKey);
+
+      let idxDate = getIdxS("trans_date");
+      if (idxDate === -1) idxDate = getIdxS("date");
+      if (idxDate === -1) idxDate = headers.findIndex(h => h.includes("ngày"));
+
+      let idxPeriod = getIdxS("period");
+      if (idxPeriod === -1) idxPeriod = headers.findIndex(h => h.includes("kỳ"));
+
+      const idxItemCode = getIdxS("item_code");
+      const idxQty = getIdxS("quantity");
+      const idxFactor = getIdxS("conversion_factor") !== -1 ? getIdxS("conversion_factor") : getIdxS("factor");
+      const idxUnit = getIdxS("input_unit") !== -1 ? getIdxS("input_unit") : getIdxS("unit");
+
+      const idxBaseQty = getIdxS("base_quantity");
+      const idxBaseUnit = getIdxS("base_unit");
+
+      let idxCat = getIdxS("category");
+      if (idxCat === -1) idxCat = headers.findIndex(h => h.includes("nhóm") || h.includes("phân loại"));
+
+      for (let i = 1; i < dataStock.length; i++) {
+        const row = dataStock[i];
+        const rawDate = idxDate !== -1 ? row[idxDate] : null;
+
+        if (idxPeriod !== -1 && rawDate) {
+          row[idxPeriod] = parsePeriod_(rawDate, tz);
+        }
+
+        const itemCode = idxItemCode !== -1 ? cleanCodeValue_(row[idxItemCode]) : "";
+        const qty = idxQty !== -1 ? (Number(row[idxQty]) || 0) : 0;
+        const rawFactor = idxFactor !== -1 ? row[idxFactor] : null;
+        const factor = (rawFactor !== "" && rawFactor !== null && !isNaN(rawFactor) && Number(rawFactor) > 0) ? Number(rawFactor) : 1;
+        const rawUnit = idxUnit !== -1 ? String(row[idxUnit] || "").trim() : "";
+
+        const master = mapItemMaster[itemCode];
+
+        if (idxBaseUnit !== -1) {
+          row[idxBaseUnit] = (master && master.base_unit) ? master.base_unit : rawUnit;
+        }
+
+        // Category cho Stocktake thuần túy theo Master Data
+        if (idxCat !== -1) {
+          const currentCat = String(row[idxCat] || "").trim();
+          if (ENABLE_CATEGORY_UPDATE || !currentCat) {
+            row[idxCat] = (master && master.category) ? master.category : "Chưa phân nhóm";
+          }
+        }
+
+        if (idxBaseQty !== -1) row[idxBaseQty] = qty * factor;
+      }
+
+      sStock.getRange(1, 1, dataStock.length, dataStock[0].length).setValues(dataStock);
+    }
+  }
+}

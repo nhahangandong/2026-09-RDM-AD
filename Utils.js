@@ -165,3 +165,148 @@ function getSourceGroupMap_(schemaMap, ss) {
 // }
 
 
+/**
+ * Tính kỳ liền trước theo mặt nạ YYYY-MM (Ví dụ: '2026-03' -> '2026-02')
+ * @param {string} strPeriod - Kỳ hiện tại dạng YYYY-MM
+ * @returns {string} Kỳ trước dạng YYYY-MM
+ */
+function getPreviousPeriod_(strPeriod) {
+  const parts = String(strPeriod).trim().split('-');
+  if (parts.length !== 2) return strPeriod;
+
+  let year = parseInt(parts[0], 10);
+  let month = parseInt(parts[1], 10);
+
+  if (month === 1) {
+    year -= 1;
+    month = 12;
+  } else {
+    month -= 1;
+  }
+  return `${year}-${String(month).padStart(2, '0')}`;
+}
+
+/**
+ * Parse giá trị ngày bất kỳ về chuỗi định dạng YYYY-MM
+ * @param {*} rawNgay - Giá trị ngày đầu vào (Date object hoặc String)
+ * @param {string} tz - Múi giờ của Spreadsheet
+ * @returns {string} Chuỗi kỳ dạng YYYY-MM
+ */
+function parsePeriod_(rawNgay, tz) {
+  if (!rawNgay) return "";
+
+  if (rawNgay instanceof Date) {
+    return Utilities.formatDate(rawNgay, tz, "yyyy-MM");
+  }
+
+  const str = String(rawNgay).trim();
+
+  // Kiểm tra định dạng YYYY-MM
+  if (/^\d{4}-\d{2}$/.test(str)) {
+    return str;
+  }
+
+  // Nếu là dạng dd/MM/yyyy
+  if (str.length >= 10 && str.includes('/')) {
+    const p = str.split('/');
+    return `${p[2].substring(0, 4)}-${p[1].padStart(2, '0')}`;
+  }
+
+  const d = new Date(str);
+  return !isNaN(d.getTime()) ? Utilities.formatDate(d, tz, "yyyy-MM") : "";
+}
+
+
+/**
+ * Hàm phụ trợ sinh danh sách các kỳ dạng YYYY-MM từ khoảng [Start, End]
+ */
+function generatePeriodRange_(startStr, endStr) {
+  const result = [];
+  const startParts = String(startStr).trim().split('-');
+  const endParts = String(endStr).trim().split('-');
+
+  if (startParts.length !== 2 || endParts.length !== 2) return [];
+
+  let sYear = parseInt(startParts[0], 10);
+  let sMonth = parseInt(startParts[1], 10);
+  let eYear = parseInt(endParts[0], 10);
+  let eMonth = parseInt(endParts[1], 10);
+
+  if (isNaN(sYear) || isNaN(sMonth) || isNaN(eYear) || isNaN(eMonth)) return [];
+
+  let currentVal = sYear * 12 + sMonth;
+  let targetLimit = eYear * 12 + eMonth;
+
+  if (currentVal > targetLimit) return [];
+
+  while (currentVal <= targetLimit) {
+    const monthStr = sMonth < 10 ? '0' + sMonth : sMonth;
+    result.push(`${sYear}-${monthStr}`);
+
+    sMonth++;
+    if (sMonth > 12) {
+      sMonth = 1;
+      sYear++;
+    }
+    currentVal = sYear * 12 + sMonth;
+  }
+
+  return result;
+}
+
+
+/**
+ * Helper tính kỳ kế tiếp YYYY-MM trong Utils hoặc cục bộ
+ */
+function getNextPeriod_(strPeriod) {
+  const parts = String(strPeriod).trim().split('-');
+  if (parts.length !== 2) return strPeriod;
+
+  let year = parseInt(parts[0], 10);
+  let month = parseInt(parts[1], 10);
+
+  if (month === 12) {
+    year += 1;
+    month = 1;
+  } else {
+    month += 1;
+  }
+  return `${year}-${String(month).padStart(2, '0')}`;
+}
+
+
+/**
+ * Helper tự động cập nhật số dư đầu kỳ cho kỳ kế tiếp (LOCATION_ITEM_BALANCE)
+ * Đặt trong Utils.gs, không dùng static.
+ */
+function updateNextPeriodBalance_(ss, schemaMap, nextPeriod, newRows) {
+  const S_BAL = "LOCATION_ITEM_BALANCE";
+  const sheetName = schemaGetSheetName(schemaMap, S_BAL);
+  let sBal = ss.getSheetByName(sheetName);
+  if (!sBal) return; // Nếu chưa tạo sheet balance thì bỏ qua
+
+  let dataBal = sBal.getDataRange().getValues();
+  const cols = schemaMap[S_BAL].columns;
+  const headers = cols.map(c => c.colHeader || c.colKey);
+
+  if (dataBal.length === 0 || dataBal[0][0] === "") {
+    dataBal = [headers];
+  }
+
+  const idxP = schemaGetColIndex(schemaMap, S_BAL, "period");
+
+  // Lọc bỏ các dòng cũ của kỳ nextPeriod để ghi đè mới hoàn toàn số liệu chốt sổ sạch
+  const filteredBal = [dataBal[0]];
+  for (let i = 1; i < dataBal.length; i++) {
+    const p = String(dataBal[i][idxP] || "").trim().replace(/\.0$/, '');
+    if (p !== nextPeriod) {
+      filteredBal.push(dataBal[i]);
+    }
+  }
+
+  // Thêm các dòng số dư mới vào
+  newRows.forEach(r => filteredBal.push(r));
+
+  sBal.clearContents();
+  sBal.getRange(1, 1, filteredBal.length, cols.length).setValues(filteredBal);
+}

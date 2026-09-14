@@ -7,7 +7,7 @@
  * Đồng bộ danh mục từ SALES sang MENU theo SCHEMA chuẩn hóa.
  * Tự động gán đúng vị trí cột dựa trên col_key trong tbl_schema.
  */
-function runSyncSalesToMenu() {
+function productSyncSalesToMenu() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const ui = SpreadsheetApp.getUi();
 
@@ -42,7 +42,10 @@ function runSyncSalesToMenu() {
   const validSalesCodes = new Set();
   const salesData = salesSheet.getDataRange().getValues();
   for (let i = 1; i < salesData.length; i++) {
-    const itemVal = salesData[i][colSalesItem] ? salesData[i][colSalesItem].toString().trim() : "";
+    const rawVal = salesData[i][colSalesItem];
+    const itemVal = rawVal !== null && rawVal !== undefined ? String(rawVal).trim() : "";
+    
+    // Kiểm tra an toàn chuỗi trước khi so sánh
     if (itemVal && !itemVal.toLowerCase().includes("unmapped")) {
       validSalesCodes.add(itemVal);
     }
@@ -66,8 +69,8 @@ function runSyncSalesToMenu() {
   const mappingNameByCode = new Map();
   for (let i = 1; i < mappingData.length; i++) {
     const row = mappingData[i];
-    const code = row[colMapItemCode] ? row[colMapItemCode].toString().trim() : "";
-    const name = colMapItemName !== -1 && row[colMapItemName] ? row[colMapItemName].toString().trim() : "";
+    const code = row[colMapItemCode] !== null && row[colMapItemCode] !== undefined ? String(row[colMapItemCode]).trim() : "";
+    const name = colMapItemName !== -1 && row[colMapItemName] !== null && row[colMapItemName] !== undefined ? String(row[colMapItemName]).trim() : "";
     if (code) {
       mappingNameByCode.set(code, name || code);
     }
@@ -96,7 +99,7 @@ function runSyncSalesToMenu() {
 
   const existingMenuCodes = new Set();
   for (let i = 1; i < menuData.length; i++) {
-    const code = menuData[i][idxMenuCode] ? menuData[i][idxMenuCode].toString().trim() : "";
+    const code = menuData[i][idxMenuCode] !== null && menuData[i][idxMenuCode] !== undefined ? String(menuData[i][idxMenuCode]).trim() : "";
     if (code) existingMenuCodes.add(code);
   }
 
@@ -135,8 +138,8 @@ function runSyncSalesToMenu() {
   }
 
   // 6. Ghi dữ liệu xuống MENU chính xác theo độ dài cột SCHEMA
-  const lastRow = menuSheet.getLastRow();
-  menuSheet.getRange(lastRow + 1, 1, rowsToAdd.length, maxMenuColCount).setValues(rowsToAdd);
+  const startRow = Math.max(menuSheet.getLastRow() + 1, 2);
+  menuSheet.getRange(startRow, 1, rowsToAdd.length, maxMenuColCount).setValues(rowsToAdd);
 
   ui.alert("✅ Thành công", `Đã khởi tạo thành công ${rowsToAdd.length} mã món từ SALES sang MENU theo đúng SCHEMA!`, ui.ButtonSet.OK);
 }

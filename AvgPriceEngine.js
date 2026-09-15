@@ -300,11 +300,27 @@ static monthly_avg_price(periodTarget) {
     const nowStr = Utilities.formatDate(new Date(), tz, "yyyy-MM-dd HH:mm:ss");
     const mapUnitPrice = {};
 
+    // 5. Gom tất cả các mã cần xử lý từ nhiều nguồn (Transaction, Lịch sử, Master, Balance Kỳ N và Kỳ N+1)
     const activeItemCodes = new Set(Object.keys(mapInboundQty));
     Object.keys(mapHistoricalPrice).forEach(k => activeItemCodes.add(k));
     Object.keys(mapItemMaster).forEach(k => {
       if (mapItemMaster[k].costPrice > 0) activeItemCodes.add(k);
     });
+
+    // Vét thêm từ BALANCE_OPENING của cả kỳ hiện tại (N) và kỳ kế tiếp (N+1) để tránh bỏ sót mã bị trễ/lọt sổ
+    const targetPeriodClean = strPeriod.replace(/[-\/]/g, '');
+    const nextPeriodClean = getNextPeriod_(strPeriod).replace(/[-\/]/g, '');
+    
+    const idxBalPeriod = getIdx(S_BAL, "period");
+    const idxBalItem   = getIdx(S_BAL, "item_code");
+
+    for (let i = 1; i < dataBal.length; i++) {
+      const p = String(dataBal[i][idxBalPeriod] || "").trim().replace(/\.0$/, '').replace(/[-\/]/g, '');
+      if (p === targetPeriodClean || p === nextPeriodClean) {
+        const itemCode = cleanCodeValue_(dataBal[i][idxBalItem]);
+        if (itemCode) activeItemCodes.add(itemCode);
+      }
+    }
 
     activeItemCodes.forEach(itemCode => {
       if (!mapItemMaster[itemCode]) return; 
@@ -338,8 +354,7 @@ static monthly_avg_price(periodTarget) {
       const baseUnit = master.unit || dynamic.unit || "N/A";
       const category = master.category || dynamic.category || "Chưa phân nhóm";
 
-      const cleanTargetPeriod = strPeriod.replace(/[-\/]/g, '');
-      const fullKey = `${cleanTargetPeriod}_${itemCode}`;
+      const fullKey = `${targetPeriodClean}_${itemCode}`;
       const rowValues = new Array(maxColIndex);
 
       priceCols.forEach(col => {
@@ -370,22 +385,17 @@ static monthly_avg_price(periodTarget) {
     // 6. Ghi dữ liệu ra sheet MONTHLY_PRICE_LIST
     sPrice.getRange(1, 1, currentPriceData.length, maxColIndex).setValues(currentPriceData);
 
-    // 7. Cập nhật ngược lại BALANCE_OPENING cho KỲ KẾ TIẾP (nextPeriod) dựa trên đơn giá tháng hiện tại
-    const idxBalPeriod = getIdx(S_BAL, "period");
-    const idxBalItem   = getIdx(S_BAL, "item_code");
+    // 7. Cập nhật ngược lại BALANCE_OPENING độc quyền cho KỲ KẾ TIẾP (nextPeriod)
     const idxBalQty    = getIdx(S_BAL, "opening_qty");
     const idxBalCost   = getIdx(S_BAL, "unit_cost");
     const idxBalVal    = getIdx(S_BAL, "opening_value");
     const idxBalDate   = getIdx(S_BAL, "updated_at");
 
-    const nextPeriodStr = getNextPeriod_(strPeriod);
-    const nextPeriodClean = nextPeriodStr.replace(/[-\/]/g, '');
-
     let isBalUpdated = false;
     for (let i = 1; i < dataBal.length; i++) {
       const p = String(dataBal[i][idxBalPeriod] || "").trim().replace(/\.0$/, '').replace(/[-\/]/g, '');
       
-      // Chỉ ghi nhận và cập nhật vào số dư đầu kỳ của KỲ KẾ TIẾP (ví dụ: chạy tháng 7 thì cập nhật sang đầu kỳ tháng 8)
+      // Chỉ ghi nhận vào số dư đầu kỳ của KỲ KẾ TIẾP (ví dụ chạy tháng 7 -> cập nhật đầu kỳ tháng 8)
       if (p === nextPeriodClean) {
         const itemCode = cleanCodeValue_(dataBal[i][idxBalItem]);
         const qty = Number(dataBal[i][idxBalQty]) || 0;

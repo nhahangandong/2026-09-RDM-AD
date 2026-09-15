@@ -298,3 +298,152 @@ class StockEngine {
     SpreadsheetApp.flush();
   }
 }
+
+
+
+/**
+* Hàm tính giá trị tồn kho dựa trên _qty và month_price_list
+*/
+
+class StockEngineValue {
+  static calculate(periodTarget) {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const tz = ss.getSpreadsheetTimeZone();
+    const schemaMap = schemaGetMap();
+    if (!schemaMap) throw new Error("Không thể tải cấu trúc SCHEMA từ hệ thống.");
+
+    const S_QTY   = "INVENTORY_QTY_SUMMARY";
+    const S_PRICE = "MONTHLY_PRICE_LIST";
+    const S_VAL   = "INVENTORY_VALUE_SUMMARY";
+
+    const sQtyName   = schemaGetSheetName(schemaMap, S_QTY);
+    const sPriceName = schemaGetSheetName(schemaMap, S_PRICE);
+    const sValName   = schemaGetSheetName(schemaMap, S_VAL);
+
+    const sQty   = sQtyName ? ss.getSheetByName(sQtyName) : null;
+    const sPrice = sPriceName ? ss.getSheetByName(sPriceName) : null;
+    const sVal   = sValName ? ss.getSheetByName(sValName) : null;
+
+    if (!sQty || !sPrice || !sVal) {
+      throw new Error("Không tìm thấy đủ các sheet yêu cầu (INVENTORY_QTY_SUMMARY, MONTHLY_PRICE_LIST, INVENTORY_VALUE_SUMMARY) theo SCHEMA.");
+    }
+
+    const dataQty   = sQty.getDataRange().getValues();
+    const dataPrice = sPrice.getDataRange().getValues();
+    const dataVal   = sVal.getDataRange().getValues();
+
+    const strPeriod = String(periodTarget).trim();
+    const targetClean = strPeriod.replace(/[-\/]/g, '');
+    const getIdx = (sName, cKey) => schemaGetColIndex(schemaMap, sName, cKey);
+
+    // 1. Tải đơn giá từ MONTHLY_PRICE_LIST của kỳ tương ứng
+    const mapUnitPrice = {};
+    const idxPricePeriod = getIdx(S_PRICE, "period");
+    const idxPriceItem   = getIdx(S_PRICE, "item_code");
+    const idxPriceVal    = getIdx(S_PRICE, "unit_price");
+
+    for (let i = 1; i < dataPrice.length; i++) {
+      const p = String(dataPrice[i][idxPricePeriod] || "").trim().replace(/\.0$/, '').replace(/[-\/]/g, '');
+      if (p === targetClean) {
+        const itemCode = cleanCodeValue_(dataPrice[i][idxPriceItem]);
+        const price = Number(dataPrice[i][idxPriceVal]) || 0;
+        if (itemCode) {
+          mapUnitPrice[itemCode] = price;
+        }
+      }
+    }
+
+    // 2. Chuẩn bị cấu trúc headers vật lý cho INVENTORY_VALUE_SUMMARY
+    const valCols = schemaMap[S_VAL].columns.sort((a, b) => a.colIndex - b.colIndex);
+    const maxColIndex = Math.max(...valCols.map(c => c.colIndex));
+    const headers = new Array(maxColIndex);
+    valCols.forEach(c => {
+      headers[c.colIndex - 1] = c.colHeader;
+    });
+
+    let currentValData = dataVal;
+    if (currentValData.length === 0 || currentValData[0][0] === "") {
+      currentValData = [headers];
+    } else {
+      currentValData[0] = headers;
+    }
+
+    const keyIndexMap = {};
+    const idxValPeriod = getIdx(S_VAL, "period");
+    const idxValLoc    = getIdx(S_VAL, "location_code");
+    const idxValItem   = getIdx(S_VAL, "item_code");
+
+    for (let i = 1; i < currentValData.length; i++) {
+      const p = String(currentValData[i][idxValPeriod] || "").trim().replace(/\.0$/, '').replace(/[-\/]/g, '');
+      const loc = cleanCodeValue_(currentValData[i][idxValLoc]);
+      const item = cleanCodeValue_(currentValData[i][idxValItem]);
+      if (p && loc && item) {
+        keyIndexMap[`${p}_${loc}_${item}`] = i;
+      }
+    }
+
+    const nowStr = Utilities.formatDate(new Date(), tz, "yyyy-MM-dd HH:mm:ss");
+
+    // 3. Đọc dữ liệu từ INVENTORY_QTY_SUMMARY và ánh xạ tính giá trị theo quy tắc đối xứng _qty -> _value
+    const idxQtyPeriod = getIdx(S_QTY, "period");
+    const idxQtyLoc    = getIdx(S_QTY, "location_code");
+    const idxQtyItem   = getIdx(S_QTY, "item_code");
+
+    for (let i = 1; i < dataQty.length; i++) {
+      const rowQty = dataQty[i];
+      const p = String(rowQty[idxQtyPeriod] || "").trim().replace(/\.0$/, '').replace(/[-\/]/g, '');
+      
+      if (p !== targetClean) continue;
+
+      const locationCode = cleanCodeValue_(rowQty[idxQtyLoc]);
+      const itemCode     = cleanCodeValue_(rowQty[idxQtyItem]);
+      if (!locationCode || !itemCode) continue;
+
+      const unitPrice = mapUnitPrice[itemCode] || 0;
+      const fullKey = `${targetClean}_${locationCode}_${itemCode}`;
+
+      const rowValues = new Array(maxColIndex);
+      valCols.forEach(col => {
+        const colIdx = col.colIndex - 1;
+        const cKey = col.colKey;
+
+        if (cKey === "period") {
+          rowValues[colIdx] = strPeriod;
+        } else if (cKey === "location_code") {
+          rowValues[colIdx] = locationCode;
+        } else if (cKey === "item_code") {
+          rowValues[colIdx] = itemCode;
+        } else if (cKey === "unit_price") {
+          rowValues[colIdx] = unitPrice;
+        } else if (cKey === "updated_at") {
+          rowValues[colIdx] = nowStr;
+        } else if (cKey.endsWith('_value')) {
+          // Tự động tìm cột _qty tương ứng và nhân với đơn giá vốn
+          const qtyKey = cKey.replace('_value', '_qty');
+          const qtyColIdx = getIdx(S_QTY, qtyKey);
+          if (qtyColIdx !== -1) {
+            const qtyVal = Number(rowQty[qtyColIdx]) || 0;
+            rowValues[colIdx] = qtyVal * unitPrice;
+          } else {
+            rowValues[colIdx] = 0;
+          }
+        } else {
+          // Các cột thông tin text/danh mục chung (tên hàng, đvt, nhóm hàng,...) lấy trực tiếp từ QTY
+          const srcColIdx = getIdx(S_QTY, cKey);
+          rowValues[colIdx] = srcColIdx !== -1 ? rowQty[srcColIdx] : "";
+        }
+      });
+
+      if (keyIndexMap[fullKey] !== undefined) {
+        currentValData[keyIndexMap[fullKey]] = rowValues;
+      } else {
+        currentValData.push(rowValues);
+        keyIndexMap[fullKey] = currentValData.length - 1;
+      }
+    }
+
+    // 4. Ghi kết quả ra sheet INVENTORY_VALUE_SUMMARY
+    sVal.getRange(1, 1, currentValData.length, maxColIndex).setValues(currentValData);
+    SpreadsheetApp.flush();
+  }
+}

@@ -1,14 +1,14 @@
 /**
  * ============================================================================
  * MODULE: TheoreticalEngine.gs
- * Chuyên trách tính toán tiêu hao lý thuyết (Theoretical Usage)
+ * Chuyên trách tính toán tiêu hao lý thuyết (Theoretical Usage) theo chuẩn UPSERT
  * ============================================================================
  */
 
 class TheoreticalEngine {
 
   /**
-   * Tính toán và tổng hợp tiêu hao lý thuyết cho một kỳ chỉ định
+   * Tính toán và tổng hợp tiêu hao lý thuyết cho một kỳ chỉ định theo chuẩn UPSERT
    * @param {string} targetPeriod - Kỳ tính toán (VD: "2026-08")
    * @param {boolean} isBatch - True nếu chạy hàng loạt (bỏ popup), False nếu chạy lẻ
    */
@@ -57,7 +57,7 @@ class TheoreticalEngine {
     const excludedItemTypes = configMap.get("EXCLUDED_ITEM_TYPES") || [];
     const excludedSet = new Set(excludedItemTypes.map(t => String(t).trim().toUpperCase()));
 
-    // 2. Load Item Master (Đọc category và cost_price gốc)
+    // 2. Load Item Master
     const itemMasterData = itemMasterSheet.getDataRange().getValues();
     const idxImCode = schemaGetColIndex(schemaMap, "ITEM_MASTER", "item_code");
     const idxImName = schemaGetColIndex(schemaMap, "ITEM_MASTER", "item_name");
@@ -85,7 +85,7 @@ class TheoreticalEngine {
       }
     }
 
-    // 3. Load Menu Map (Kiểm tra liên kết và loại trừ dịch vụ động)
+    // 3. Load Menu Map
     const menuMap = new Map();
     if (menuSheet && schemaMap["MENU"]) {
       const menuData = menuSheet.getDataRange().getValues();
@@ -131,7 +131,7 @@ class TheoreticalEngine {
       }
     }
 
-    // 5. Đệ quy bóc tách BOM đa tầng
+    // 5. Đệ quy bóc tách BOM
     const explodeBom = (currentCode, accumulatedQty, resultRawMap) => {
       const imInfo = itemMasterMap.get(currentCode);
       const requiresBom = imInfo ? imInfo.hasBom : false;
@@ -149,7 +149,7 @@ class TheoreticalEngine {
       }
     };
 
-    // 6. Đọc SALES và tiến hành quy đổi tiêu hao
+    // 6. Đọc SALES và quy đổi tiêu hao
     const salesData = salesSheet.getDataRange().getValues();
     const idxSalesPeriod = schemaGetColIndex(schemaMap, "SALES", "period");
     const idxSalesItemCode = schemaGetColIndex(schemaMap, "SALES", "item_code");
@@ -170,10 +170,9 @@ class TheoreticalEngine {
 
       if (!soldItemCode || soldQty <= 0) continue;
 
-      // Kiểm tra loại trừ món dịch vụ thông qua menuMap động
       if (menuMap.has(soldItemCode)) {
         const menuInfo = menuMap.get(soldItemCode);
-        if (menuInfo.isExcluded) continue; // Bỏ qua các món dịch vụ, phụ phí
+        if (menuInfo.isExcluded) continue;
         if (menuInfo.linkedItem) soldItemCode = menuInfo.linkedItem;
       }
 
@@ -186,7 +185,7 @@ class TheoreticalEngine {
       });
     }
 
-    // 7. Load Price History (Waterfall Pricing)
+    // 7. Load Price History
     const priceHistoryMap = new Map();
     if (priceSheet && schemaMap["MONTHLY_PRICE_LIST"]) {
       const priceData = priceSheet.getDataRange().getValues();
@@ -232,15 +231,39 @@ class TheoreticalEngine {
       return 0;
     };
 
-    // 8. Chuẩn bị ghi kết quả ra sheet THEORETICAL_USAGE theo Schema
+    // 8. XỬ LÝ THEO CHUẨN UPSERT THUẦN TÚY
     const usageCols = schemaMap["THEORETICAL_USAGE"].columns.sort((a, b) => a.colIndex - b.colIndex);
     const maxColCount = Math.max(...usageCols.map(c => c.colIndex));
-    const rowsToInsert = [];
+    
+    let currentData = targetSheet.getDataRange().getValues();
+    if (currentData.length === 0 || currentData[0][0] === "") {
+      const headers = usageCols.map(c => c.colHeader || c.colKey);
+      currentData = [headers];
+    }
+
+    const idxUPeriod = schemaGetColIndex(schemaMap, "THEORETICAL_USAGE", "period");
+    const idxUItem = schemaGetColIndex(schemaMap, "THEORETICAL_USAGE", "item_code");
+    const idxUDept = schemaGetColIndex(schemaMap, "THEORETICAL_USAGE", "department_code");
+
+    // Lập bản đồ (Map) định vị dòng dữ liệu cũ theo khóa [period + department + item_code] để UPSERT
+    const keyIndexMap = {};
+    for (let i = 1; i < currentData.length; i++) {
+      const p = String(currentData[i][idxUPeriod] || "").trim().replace(/\.0$/, '');
+      const dept = idxUDept !== -1 ? String(currentData[i][idxUDept] || "").trim() : "";
+      const item = String(currentData[i][idxUItem] || "").trim();
+      if (p && item) {
+        keyIndexMap[`${p}_${dept}_${item}`] = i;
+      }
+    }
+
+    let countUpdated = 0;
+    let countInserted = 0;
 
     rawUsageMap.forEach((theoQty, keyStr) => {
       const parts = keyStr.split("|");
       const dept = parts[0];
       const itemCode = parts[1];
+      const fullKey = `${targetClean}_${dept}_${itemCode}`;
 
       const imInfo = itemMasterMap.get(itemCode) || { name: itemCode, unit: "", category: "Chưa phân nhóm" };
       const unitPrice = getResolvedPrice(itemCode, targetClean);
@@ -256,29 +279,34 @@ class TheoreticalEngine {
         else if (cKey === "item_code") rowArr[colIdx] = itemCode;
         else if (cKey === "item_name") rowArr[colIdx] = imInfo.name;
         else if (cKey === "base_unit") rowArr[colIdx] = imInfo.unit;
-        else if (cKey === "category") rowArr[colIdx] = imInfo.category; // Cột category nguyên liệu
+        else if (cKey === "category") rowArr[colIdx] = imInfo.category;
         else if (cKey === "theo_qy" || cKey === "theoretical_qty") rowArr[colIdx] = Math.round(theoQty * 1000) / 1000;
         else if (cKey === "unit_price") rowArr[colIdx] = Math.round(unitPrice * 100) / 100;
         else if (cKey === "theo_val" || cKey === "theoretical_amount") rowArr[colIdx] = Math.round(theoVal * 100) / 100;
       });
 
-      rowsToInsert.push(rowArr);
+      if (keyIndexMap[fullKey] !== undefined) {
+        // Cập nhật (Update) dòng hiện có
+        currentData[keyIndexMap[fullKey]] = rowArr;
+        countUpdated++;
+      } else {
+        // Thêm mới (Insert)
+        currentData.push(rowArr);
+        keyIndexMap[fullKey] = currentData.length - 1;
+        countInserted++;
+      }
     });
 
-    if (targetSheet.getLastRow() > 1) {
-      targetSheet.getRange(2, 1, targetSheet.getLastRow() - 1, maxColCount).clearContent();
-    }
-
-    if (rowsToInsert.length > 0) {
-      targetSheet.getRange(2, 1, rowsToInsert.length, maxColCount).setValues(rowsToInsert);
-    }
+    // Ghi lại toàn bộ dữ liệu xuống sheet một lần duy nhất tối ưu hiệu năng
+    targetSheet.clearContents();
+    targetSheet.getRange(1, 1, currentData.length, maxColCount).setValues(currentData);
     SpreadsheetApp.flush();
 
-    // Thông báo giao diện thông minh (Toast nếu batch, Alert nếu chạy lẻ)
+    const summaryMsg = `Kỳ [${targetClean}]: Cập nhật ${countUpdated}, Thêm mới ${countInserted} dòng.`;
     if (isBatch) {
-      ss.toast(`Đã xử lý xong Theoretical kỳ [${targetClean}] (${rowsToInsert.length} dòng)`, "TheoreticalEngine", 3);
+      ss.toast(summaryMsg, "TheoreticalEngine", 3);
     } else {
-      ui.alert("✅ Thành Công", `Đã tính toán xong tiêu hao lý thuyết kỳ [${targetClean}] (${rowsToInsert.length} dòng)`, ui.ButtonSet.OK);
+      ui.alert("✅ Upsert Thành Công", summaryMsg, ui.ButtonSet.OK);
     }
   }
 }

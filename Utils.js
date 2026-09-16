@@ -383,3 +383,7 @@ function assignGroupSttByTransNo(sheet, colIndexTransNo, colIndexStt) {
     sheet.getRange(2, colIndexStt, sttColumnData.length, 1).setValues(sttColumnData);
   }
 }
+
+
+
+

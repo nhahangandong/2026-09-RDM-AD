@@ -2,34 +2,28 @@
  * ============================================================================
  * FILE: MenuUI.gs
  * MỤC ĐÍCH: Khai báo các hàm Entry Point phục vụ gán sự kiện gọi từ Menu UI.
- * Quy tắc đặt tên: actionEntityDescription (CamelCase)
+ * Quy tắc đặt tên chuẩn: run + [Hành động] + [Thực thể] (CamelCase)
  * ============================================================================
- */
-
-
- /**
- * Simple Trigger tự động tạo Menu khi mở file Google Sheets.
- * Thiết kế phân cấp Submenu theo quy trình chuẩn quản trị.
  */
 
 function onOpen() {
   const ui = SpreadsheetApp.getUi();
 
   ui.createMenu('🛠️ QUẢN TRỊ HỆ THỐNG')
-    // 1. TÁC VỤ VẬN HÀNH CHÍNH (Được gọi nhiều nhất)
+    // 1. TÁC VỤ VẬN HÀNH CHÍNH
     .addItem('📌 Gán mã SKU vào các sheet giao dịch', 'runAssignItemCodeToTransactions')
     .addItem('📝 Tự động phân loại, phân nhóm (CLASSIFICATION)', 'runAutoSuggestClassification')
     .addItem('🔄 Điền tất cả cột tính toán (Giao dịch & Kiểm kê)', 'runFillCalculatedColumnsAllSheets')
     .addSeparator()
 
-    // 2. SUBMENU MAPPING (Chuẩn hóa tên thô)
+    // 2. SUBMENU MAPPING
     .addSubMenu(ui.createMenu('🍁 1. Chuẩn hóa Mapping (Raw Data)')
       .addItem('1.1. Quét dữ liệu thô vào MAPPING', 'runSyncMappingFromTransactions')
       .addItem('1.2. Gợi ý item_name tự động (AUTO_MAP)', 'runAutoSuggestMappingNames')
       .addItem('1.3. Sinh mã SKU tự động cho MAPPING', 'runAutoGenerateSKUForMapping')
     )
 
-    // 3. SUBMENU MASTER DATA (Đã bổ sung Engine Phân loại SKU)
+    // 3. SUBMENU MASTER DATA
     .addSubMenu(ui.createMenu('🏷️ Danh mục & Master Data')
       .addItem('1. Đồng bộ ITEM_MASTER từ Giao dịch', 'runSyncItemMasterFromInventoryAndStocktake')
       .addItem('2. Đồng bộ Sales -> Menu', 'runSyncSalesToMenu')
@@ -37,19 +31,24 @@ function onOpen() {
     )
     .addSeparator()
 
-    // 4. SUBMENU TINH TỒN KHO
-    .addSubMenu(ui.createMenu('📦 Quản lý kho')
-      .addItem('▶️ Chạy tính Tồn kho Số lượng (Cho một kỳ)', 'runStockEngineQty')
-      .addItem('🚀 Chạy tính Tồn kho Số lượng (Cho nhiều kỳ)', 'runBatchCalculateQtySummary')
+    // 4. SUBMENU QUẢN LÝ KHO & GIÁ (Đã lược bỏ batch đơn giá/giá trị không an toàn)
+    .addSubMenu(ui.createMenu('📦 Quản lý Kho & Giá')
+      .addItem('📥 Tạo/Kết chuyển số dư đầu kỳ', 'runOpeningBalanceDialog')
       .addSeparator()
-      .addItem('🚀 Chạy Batch Tổng hợp Kỳ (Qty + Price)', 'uiRunBatchPipeline')
+      // A. Số lượng Kho (Cho phép Batch vì đứng đầu quy trình)
+      .addItem('▶️ [Đơn lẻ] Tính Tồn kho Số lượng (1 kỳ)', 'runStockEngineQty')
+      .addItem('🚀 [Batch] Tính Tồn kho Số lượng (Nhiều kỳ)', 'runBatchCalculateQtySummary')
       .addSeparator()
-      .addItem('🔍 Kiểm tra Đơn giá Tức thì (Monthly Avg Price)', 'uiRunMonthlyAvgPrice')
-      .addItem('📝 Chốt Giá Tháng Chính Thức (Monthly Price List)', 'uiRunMonthlyPriceList')
-      .addItem('🚀 Chạy Batch Đơn Giá Tháng', 'runBatchMonthlyPriceList')
+      // B. Đơn giá tháng (Chạy Đơn lẻ từng kỳ để kiểm soát chặt chẽ)
+      .addItem('🔍 [Kiểm tra] Đơn giá Tức thì / Check NCC (Monthly Avg Price)', 'runMonthlyAvgPrice')
+      .addItem('🔍 [Batch] Đơn giá mua bình quân tháng', 'runBatchMonthlyAvgPrice')
+      .addItem('▶️ [Đơn lẻ] Chốt Đơn giá tháng chính thức (1 kỳ)', 'runMonthlyPriceList')
       .addSeparator()
-      .addItem('▶️ Tính giá trị tồn kho (một kỳ)', 'runStockEngineValue')
-      .addItem('🚀 Tính giá trị tồn kho (nhiều kỳ)', 'runBatchStockEngineValueRange')
+      // C. Giá trị tồn kho (Chạy Đơn lẻ từng kỳ)
+      .addItem('▶️ [Đơn lẻ] Tính Giá trị tồn kho (1 kỳ)', 'runStockEngineValue')
+      .addSeparator()
+      // D. Chuẩn nhất: Chạy toàn trình tuần tự cho 1 kỳ (Qty -> Price -> Value)
+      .addItem('⚡ [Toàn trình 1 Kỳ] Chạy Full (Qty -> Price -> Value)', 'runBatchPipelineSinglePeriod')
     )
     .addSeparator()
 
@@ -60,7 +59,7 @@ function onOpen() {
       .addItem(' Làm sạch dữ liệu BOM (xóa trùng lặp)', 'runCleanRecipeBomDuplicates')
       .addSeparator()
       .addItem(' Tính nhanh chi phí cost', 'runCalculateMenuCost')
-      .addItem(' Lữu dữ liệu chi phí cost theo kỳ', 'runSaveMenuCostSnapshot')
+      .addItem(' Lưu dữ liệu chi phí cost theo kỳ', 'runSaveMenuCostSnapshot')
     )
     .addSeparator()
 
@@ -69,9 +68,8 @@ function onOpen() {
       .addItem('🔄 Tính tiêu hao lý thuyết', 'runCalculateTheoreticalUsage')
     )
     .addSeparator()
-
     
-    // 7. SUBMENU QUẢN LÝ CHI PHÍ (EXPENSE) - MỚI THÊM
+    // 7. SUBMENU QUẢN LÝ CHI PHÍ (EXPENSE)
     .addSubMenu(ui.createMenu('💰 Quản lý Chi Phí (EXPENSE)')
       .addItem('🔄 Tổng hợp EXPENSE từ Transaction', 'runExpenseSyncFromTransaction')
     )
@@ -79,639 +77,357 @@ function onOpen() {
     
     // 8. SUBMENU KHỞI TẠO & HỆ THỐNG
     .addSubMenu(ui.createMenu('⚙️ Thiết lập hệ thống')
-      .addItem('🌱  Khởi tạo / Cập nhật Sheet từ SCHEMA', 'setupSheetsFromSchema')
+      .addItem('🌱 Khởi tạo / Cập nhật Sheet từ SCHEMA', 'setupSheetsFromSchema')
     )
 
     .addToUi();
 }
 
 
+// ============================================================================
+// ENTRY POINTS: CÁC HÀM GỌI CHỨC NĂNG
+// ============================================================================
 
-/**
- * Entry Point: Đồng bộ SKU từ Transaction và Stocktake vào Item Master.
- */
-function runSyncItemMasterFromInventoryAndStocktake() {
-  itemMasterSyncFromInventoryAndStocktake();
-}
-
-/**
- * Entry Point: Đồng bộ Mã món từ Menu sang Item Master.
- */
-function runSyncItemMasterFromMenu() {
-  itemMasterSyncFromMenu();
-}
-
-/**
- * Entry Point gợi ý phân loại tự động từ Menu UI / Button
- * Cú pháp: actionEntityDescription (Tiền tố 'run')
- */
-function runAutoSuggestClassification() {
-  itemMasterAutoSuggestClassification();
-}
-
-/**
- * Entry Point: Tra cứu và điền mã SKU (item_code) từ sheet MAPPING quay trở lại các sheet giao dịch.
- */
-function runAssignItemCodeToTransactions() {
-  transactionAssignItemCodeToAllSheets();
-}
-
-/**
- * Entry Point: đồng bộ item_name & item_code từ Sales to Menu
- */
-function runSyncSalesToMenu() {
-  productSyncSalesToMenu();
-}
-
-
-/**
- * File: MainController.gs
- * Điều phối luồng chạy toàn bộ quy trình chốt kho tháng
- */
-function runMonthlyInventoryProcess() {
-  const ui = SpreadsheetApp.getUi();
-  const promptKy = ui.prompt("Chốt kho tháng", "Nhập kỳ YYYYMM (Ví dụ: 202608):", ui.ButtonSet.OK_CANCEL);
-  if (promptKy.getSelectedButton() !== ui.Button.OK) return;
-  
-  const period = promptKy.getResponseText().trim();
-  
-  try {
-    // Bước 1: Tính tồn kho số lượng
-    Logger.log(`[1/3] Đang tính INVENTORY_QTY_SUMMARY cho kỳ ${period}...`);
-    StockEngine.calculateQtySummary(period);
-
-    // Bước 2: Tính giá bình quân tháng
-    Logger.log(`[2/3] Đang tính MONTHLY_AVG_PRICE cho kỳ ${period}...`);
-    StockEngine.calculateMonthlyAvgPrice(period);
-
-    // Bước 3: Tính tồn kho giá trị
-    Logger.log(`[3/3] Đang tính INVENTORY_VALUE_SUMMARY cho kỳ ${period}...`);
-    StockEngine.calculateValueSummary(period);
-
-    ui.alert(`✅ Đã chốt thành công toàn bộ số liệu kho & giá trị kỳ ${period}!`);
-  } catch (error) {
-    Logger.log(`❌ Lỗi quy trình chốt kho: ${error.stack}`);
-    ui.alert(`❌ LỖI QUY TRÌNH: ${error.message}`);
-  }
-}
-
-
-function runStockEngineQty() {
-  const ui = SpreadsheetApp.getUi();
-  
-  // 1. Hiển thị hộp thoại yêu cầu nhập kỳ báo cáo
-  const response = ui.prompt(
-    '🔄 Tính Toán Tồn Kho Số Lượng',
-    'Vui lòng nhập Kỳ báo cáo cần tính toán (Định dạng: YYYY-MM, VD: 2026-03):',
-    ui.ButtonSet.OK_CANCEL
-  );
-
-  // 2. Xử lý khi người dùng nhấn OK
-  if (response.getSelectedButton() === ui.Button.OK) {
-    const periodTarget = response.getResponseText().trim();
-
-    // Validate định dạng YYYY-MM
-    if (!/^\d{4}-\d{2}$/.test(periodTarget)) {
-      ui.alert(
-        '⚠️ Lỗi Định Dạng', 
-        'Kỳ báo cáo không hợp lệ. Vui lòng nhập đúng định dạng YYYY-MM (VD: 2026-03).', 
-        ui.ButtonSet.OK
-      );
-      return;
-    }
-
-    // 3. Thực thi Engine
-    try {
-      SpreadsheetApp.getActiveSpreadsheet().toast(`Đang xử lý dữ liệu tồn kho kỳ ${periodTarget}...`, 'Hệ thống');
-
-      // Ép hệ thống đồng bộ các thay đổi trên Sheet trước khi đọc
-      SpreadsheetApp.flush();
-
-      // Gọi hàm Core của StockEngine
-      StockEngine.calculateQtySummary(periodTarget);
-
-      // Đẩy dữ liệu mới tính toán xuống Sheet ngay lập tức
-      SpreadsheetApp.flush();
-
-      ui.alert(
-        '✅ Thành Công', 
-        `Đã hoàn tất tính toán và cập nhật số liệu INVENTORY_QTY_SUMMARY cho kỳ ${periodTarget}.`, 
-        ui.ButtonSet.OK
-      );
-    } catch (error) {
-      ui.alert(
-        '❌ Lỗi Xử Lý', 
-        `Đã xảy ra lỗi trong quá trình tính toán:\n\n${error.message}\n\nVui lòng kiểm tra lại cấu trúc SCHEMA hoặc dữ liệu đầu vào.`, 
-        ui.ButtonSet.OK
-      );
-    }
-  }
-}
-
-
-/**
- * Controller bắt sự kiện từ Menu UI
- */
+function runSyncItemMasterFromInventoryAndStocktake() { itemMasterSyncFromInventoryAndStocktake(); }
+function runSyncItemMasterFromMenu() { itemMasterSyncFromMenu(); }
+function runAutoSuggestClassification() { itemMasterAutoSuggestClassification(); }
+function runAssignItemCodeToTransactions() { transactionAssignItemCodeToAllSheets(); }
+function runSyncSalesToMenu() { productSyncSalesToMenu(); }
 function runFillCalculatedColumnsAllSheets() {
   try {
     transactionFillCalculatedColumnsAllSheets();
-    SpreadsheetApp.getActiveSpreadsheet().toast(
-      "✅ Đã tự động tính toán và điền dữ liệu cho Giao dịch & Kiểm kê!",
-      "Thành công"
-    );
+    SpreadsheetApp.getActiveSpreadsheet().toast("✅ Đã tự động tính toán và điền dữ liệu thành công!", "Thành công");
   } catch (err) {
     SpreadsheetApp.getUi().alert("❌ Lỗi thực thi: " + err.message);
   }
 }
 
-// Khai báo trong Menu custom của Apps Script:
-// .addItem('🔄 Điền tất cả cột tính toán (Giao dịch & Kiểm kê)', 'runFillCalculatedColumnsAllSheets')
-
-
 /**
- * Kịch bản chạy hàng loạt (Batch) cho nhiều tháng liên tục
- * Nhập kỳ bắt đầu và kỳ kết thúc, tự động kiểm tra định dạng và chạy tuần tự.
+ * 1. QUẢN LÝ SỐ LƯỢNG KHO (Đơn lẻ & Batch nhiều kỳ)
  */
+function runStockEngineQty() {
+  const ui = SpreadsheetApp.getUi();
+  const response = ui.prompt('🔄 Tính Tồn Kho Số Lượng (Đơn Lẻ)', 'Nhập Kỳ báo cáo (Định dạng YYYY-MM, VD: 2026-03):', ui.ButtonSet.OK_CANCEL);
+  if (response.getSelectedButton() !== ui.Button.OK) return;
+  const periodTarget = response.getResponseText().trim();
+
+  if (!/^\d{4}-\d{2}$/.test(periodTarget)) {
+    ui.alert('⚠️ Lỗi Định Dạng', 'Vui lòng nhập đúng định dạng YYYY-MM.', ui.ButtonSet.OK);
+    return;
+  }
+
+  try {
+    SpreadsheetApp.getActiveSpreadsheet().toast(`Đang xử lý tồn kho số lượng kỳ ${periodTarget}...`, 'Hệ thống');
+    SpreadsheetApp.flush();
+    StockEngine.calculateQtySummary(periodTarget);
+    SpreadsheetApp.flush();
+    ui.alert('✅ Thành Công', `Đã hoàn tất tính số lượng kho kỳ ${periodTarget}.`, ui.ButtonSet.OK);
+  } catch (error) {
+    ui.alert('❌ Lỗi Xử Lý', error.message, ui.ButtonSet.OK);
+  }
+}
+
 function runBatchCalculateQtySummary() {
   const ui = SpreadsheetApp.getUi();
-
-  // 1. Nhập kỳ bắt đầu
-  const startResponse = ui.prompt(
-    '🔄 Chạy Tồn Kho Hàng Loạt', 
-    'Nhập KỲ BẮT ĐẦU (Định dạng YYYY-MM, VD: 2026-01):', 
-    ui.ButtonSet.OK_CANCEL
-  );
-  if (startResponse.getSelectedButton() !== ui.Button.OK) return;
-  const startPeriod = startResponse.getResponseText().trim();
-
-  if (!/^\d{4}-\d{2}$/.test(startPeriod)) {
-    ui.alert('⚠️ Lỗi Định Dạng', 'Kỳ bắt đầu không đúng định dạng YYYY-MM.', ui.ButtonSet.OK);
-    return;
-  }
-
-  // 2. Nhập kỳ kết thúc
-  const endResponse = ui.prompt(
-    '🔄 Chạy Tồn Kho Hàng Loạt', 
-    'Nhập KỲ KẾT THÚC (Định dạng YYYY-MM, VD: 2026-06):', 
-    ui.ButtonSet.OK_CANCEL
-  );
-  if (endResponse.getSelectedButton() !== ui.Button.OK) return;
-  const endPeriod = endResponse.getResponseText().trim();
-
-  if (!/^\d{4}-\d{2}$/.test(endPeriod)) {
-    ui.alert('⚠️ Lỗi Định Dạng', 'Kỳ kết thúc không đúng định dạng YYYY-MM.', ui.ButtonSet.OK);
-    return;
-  }
-
-  // 3. Tạo danh sách các kỳ theo trình tự thời gian
-  const periods = generatePeriodRange_(startPeriod, endPeriod);
-  if (periods.length === 0) {
-    ui.alert('⚠️ Lỗi Khoảng Thời Gian', 'Kỳ bắt đầu lớn hơn kỳ kết thúc hoặc khoảng thời gian không hợp lệ!', ui.ButtonSet.OK);
-    return;
-  }
-
-  // 4. Thực thi tuần tự từng kỳ (Bắt buộc chạy đúng chiều thời gian để bảo toàn tồn đầu kỳ)
-  try {
-    SpreadsheetApp.getActiveSpreadsheet().toast(`Đang xử lý tổng số ${periods.length} kỳ từ ${startPeriod} đến ${endPeriod}...`, 'Hệ thống');
-    SpreadsheetApp.flush();
-    
-    for (let i = 0; i < periods.length; i++) {
-      const targetPeriod = periods[i];
-      StockEngine.calculateQtySummary(targetPeriod);
-    }
-
-    SpreadsheetApp.flush();
-    ui.alert(
-      '✅ Hoàn Tất Thành Công', 
-      `Đã tính toán xong dữ liệu tồn kho cho toàn bộ các kỳ:\n${periods.join(', ')}`, 
-      ui.ButtonSet.OK
-    );
-
-  } catch (err) {
-    ui.alert(
-      '❌ Lỗi Thực Thi Hàng Loạt', 
-      `Đã xảy ra lỗi tại một kỳ trong chuỗi xử lý:\n\n${err.message}`, 
-      ui.ButtonSet.OK
-    );
-  }
-}
-
-
-
-/**
- * Giao diện nhập kỳ và chạy toàn bộ chuỗi Pipeline tự động
- */
-function uiRunBatchPipeline() {
-  const ui = SpreadsheetApp.getUi();
-  const response = ui.prompt('Chạy Batch Tổng hợp Kho', 'Nhập kỳ tính toán (Định dạng YYYY-MM):', ui.ButtonSet.OK_CANCEL);
-  
-  if (response.getSelectedButton() === ui.Button.OK) {
-    const period = response.getResponseText().trim();
-    if (!period) {
-      ui.alert('Vui lòng nhập kỳ hợp lệ!');
-      return;
-    }
-
-    // Quy tắc xác thực định dạng kỳ (YYYY-MM)
-    const periodRegex = /^\d{4}-(?:0[1-9]|1[0-2])$/;
-    if (!periodRegex.test(period)) {
-      ui.alert('Lỗi: Định dạng kỳ không hợp lệ! Vui lòng nhập theo chuẩn YYYY-MM (Ví dụ: 2026-08).');
-      return;
-    }
-
-    try {
-      StockEngine.calculateQtySummary(period);
-      AvgPriceEngine.monthly_avg_price(period);
-      AvgPriceEngine.monthly_price_list(period);
-
-      ui.alert(`Thành công! Đã hoàn tất xử lý toàn bộ dữ liệu cho kỳ ${period}.`);
-    } catch (err) {
-      ui.alert(`Đã xảy ra lỗi: ${err.message}`);
-    }
-  }
-}
-
-
-/**
- * Giao diện chạy độc lập hàm kiểm tra đơn giá tức thì
- */
-function uiRunMonthlyAvgPrice() {
-  const ui = SpreadsheetApp.getUi();
-  const response = ui.prompt('Kiểm tra Đơn giá Tức thì', 'Nhập kỳ tính toán (Định dạng YYYY-MM):', ui.ButtonSet.OK_CANCEL);
-  
-  if (response.getSelectedButton() === ui.Button.OK) {
-    const period = response.getResponseText().trim();
-    if (!period) return;
-
-    // Quy tắc xác thực định dạng kỳ (YYYY-MM)
-    const periodRegex = /^\d{4}-(?:0[1-9]|1[0-2])$/;
-    if (!periodRegex.test(period)) {
-      ui.alert('Lỗi: Định dạng kỳ không hợp lệ! Vui lòng nhập theo chuẩn YYYY-MM (Ví dụ: 2026-08).');
-      return;
-    }
-
-    try {
-      AvgPriceEngine.monthly_avg_price(period);
-      ui.alert(`Đã cập nhật bảng MONTHLY_AVG_PRICE cho kỳ ${period}.`);
-    } catch (err) {
-      ui.alert(`Lỗi: ${err.message}`);
-    }
-  }
-}
-
-/**
- * Giao diện chạy độc lập hàm chốt giá tháng chính thức
- */
-function uiRunMonthlyPriceList() {
-  const ui = SpreadsheetApp.getUi();
-  const response = ui.prompt('Chốt Giá Tháng Chính Thức', 'Nhập kỳ tính toán (Định dạng YYYY-MM):', ui.ButtonSet.OK_CANCEL);
-  
-  if (response.getSelectedButton() === ui.Button.OK) {
-    const period = response.getResponseText().trim();
-    if (!period) return;
-
-    // Quy tắc xác thực định dạng kỳ (YYYY-MM)
-    const periodRegex = /^\d{4}-(?:0[1-9]|1[0-2])$/;
-    if (!periodRegex.test(period)) {
-      ui.alert('Lỗi: Định dạng kỳ không hợp lệ! Vui lòng nhập theo chuẩn YYYY-MM (Ví dụ: 2026-08).');
-      return;
-    }
-
-    try {
-      AvgPriceEngine.monthly_price_list(period);
-      ui.alert(`Đã hoàn tất chốt giá tháng và cập nhật Balance cho kỳ ${period}.`);
-    } catch (err) {
-      ui.alert(`Lỗi: ${err.message}`);
-    }
-  }
-}
-
-
-
-/**
- * Hàm UI / Entry Point: Chạy Batch nhiều kỳ liên tiếp cho Đơn giá tháng
- * Theo quy ước: actionEntityDescription (runBatchMonthlyPriceList)
- */
-/**
- * Chạy Batch Đơn Giá Tháng hàng loạt từ kỳ Bắt đầu đến Kết thúc (Dùng Toast thông báo)
- */
-function runBatchMonthlyPriceList() {
-  const ui = SpreadsheetApp.getUi();
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  
-  // 1. Nhập kỳ BẮT ĐẦU (Giữ lại prompt tương tác duy nhất lúc khởi tạo)
-  const startRes = ui.prompt(
-    "Chạy Batch Đơn Giá Tháng",
-    "Nhập kỳ BẮT ĐẦU (Định dạng YYYY-MM, VD: 2026-03):",
-    ui.ButtonSet.OK_CANCEL
-  );
+  const startRes = ui.prompt('🔄 Batch Số Lượng Kho', 'Nhập KỲ BẮT ĐẦU (YYYY-MM):', ui.ButtonSet.OK_CANCEL);
   if (startRes.getSelectedButton() !== ui.Button.OK) return;
   const startPeriod = startRes.getResponseText().trim();
 
-  // 2. Nhập kỳ KẾT THÚC (Giữ lại prompt tương tác duy nhất lúc khởi tạo)
-  const endRes = ui.prompt(
-    "Chạy Batch Đơn Giá Tháng",
-    "Nhập kỳ KẾT THÚC (Định dạng YYYY-MM, VD: 2026-08):",
-    ui.ButtonSet.OK_CANCEL
-  );
+  const endRes = ui.prompt('🔄 Batch Số Lượng Kho', 'Nhập KỲ KẾT THÚC (YYYY-MM):', ui.ButtonSet.OK_CANCEL);
   if (endRes.getSelectedButton() !== ui.Button.OK) return;
   const endPeriod = endRes.getResponseText().trim();
 
-  if (!startPeriod || !endPeriod || startPeriod > endPeriod) {
-    ui.alert("Lỗi", "Kỳ nhập không hợp lệ hoặc kỳ bắt đầu lớn hơn kỳ kết thúc.", ui.ButtonSet.OK);
-    return;
-  }
-
-  let currentPeriod = startPeriod;
-  let successCount = 0;
-  let errorLog = [];
-
-  // Hàm helper hiển thị toast ở góc phải dưới màn hình Google Sheets
-  const progressToast = (msg, title = "Batch Đơn Giá Tháng") => {
-    ss.toast(msg, title, 6);
-  };
-
-  progressToast(`🚀 Bắt đầu chạy batch từ ${startPeriod} đến ${endPeriod}...`, "Khởi động");
-
-  try {
-    // 3. Vòng lặp chạy ngầm xuyên suốt các kỳ không bị ngắt quãng bởi hộp thoại
-    while (currentPeriod <= endPeriod) {
-      progressToast(`⏳ Đang xử lý tính đơn giá cho kỳ: [ ${currentPeriod} ]...`);
-      
-      try {
-        // Gọi hàm xử lý cốt lõi tính đơn giá bình quân của kỳ hiện tại
-        AvgPriceEngine.monthly_price_list(currentPeriod);
-        successCount++;
-      } catch (err) {
-        errorLog.push(`Kỳ ${currentPeriod}: ${err.message}`);
-      }
-
-      // Chuyển sang kỳ tiếp theo thông qua hàm phụ trợ getNextPeriod_ có sẵn trong dự án
-      currentPeriod = getNextPeriod_(currentPeriod);
-      if (!currentPeriod) break;
-    }
-
-    // 4. Tổng kết toàn bộ quá trình bằng 1 thông báo duy nhất khi kết thúc
-    let summaryMsg = `Đã hoàn thành chạy batch từ ${startPeriod} đến ${endPeriod}.\n- Thành công: ${successCount} kỳ.`;
-    if (errorLog.length > 0) {
-      summaryMsg += `\n- Có lỗi xảy ra ở các kỳ:\n${errorLog.join("\n")}`;
-      ui.alert("⚠️ Hoàn tất có cảnh báo", summaryMsg, ui.ButtonSet.OK);
-    } else {
-      progressToast(`✨ Đã chạy batch thành công toàn bộ ${successCount} kỳ!`, "Hoàn tất");
-      ui.alert("✅ Thành công", summaryMsg, ui.ButtonSet.OK);
-    }
-
-  } catch (e) {
-    ui.alert("❌ Lỗi Hệ thống", `Quá trình chạy batch bị gián đoạn: ${e.message}`, ui.ButtonSet.OK);
-  }
-}
-
-
-/**
- * Kịch bản chạy hàng loạt (Batch) cho giá trị tồn kho nhiều tháng liên tục
- * Nhập kỳ bắt đầu và kỳ kết thúc, tự động kiểm tra định dạng, chạy tuần tự và báo cáo qua Toast/Alert cuối kỳ.
- */
-function runBatchStockEngineValueRange() {
-  const ui = SpreadsheetApp.getUi();
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-
-  // 1. Nhập kỳ bắt đầu
-  const startResponse = ui.prompt(
-    '🔄 Chạy Giá Trị Tồn Kho Hàng Loạt', 
-    'Nhập KỲ BẮT ĐẦU (Định dạng YYYY-MM, VD: 2026-01):', 
-    ui.ButtonSet.OK_CANCEL
-  );
-  if (startResponse.getSelectedButton() !== ui.Button.OK) return;
-  const startPeriod = startResponse.getResponseText().trim();
-
-  if (!/^\d{4}-\d{2}$/.test(startPeriod)) {
-    ui.alert('⚠️ Lỗi Định Dạng', 'Kỳ bắt đầu không đúng định dạng YYYY-MM.', ui.ButtonSet.OK);
-    return;
-  }
-
-  // 2. Nhập kỳ kết thúc
-  const endResponse = ui.prompt(
-    '🔄 Chạy Giá Trị Tồn Kho Hàng Loạt', 
-    'Nhập KỲ KẾT THÚC (Định dạng YYYY-MM, VD: 2026-12):', 
-    ui.ButtonSet.OK_CANCEL
-  );
-  if (endResponse.getSelectedButton() !== ui.Button.OK) return;
-  const endPeriod = endResponse.getResponseText().trim();
-
-  if (!/^\d{4}-\d{2}$/.test(endPeriod)) {
-    ui.alert('⚠️ Lỗi Định Dạng', 'Kỳ kết thúc không đúng định dạng YYYY-MM.', ui.ButtonSet.OK);
-    return;
-  }
-
-  // 3. Tạo danh sách các kỳ theo trình tự thời gian
   const periods = generatePeriodRange_(startPeriod, endPeriod);
   if (periods.length === 0) {
-    ui.alert('⚠️ Lỗi Khoảng Thời Gian', 'Kỳ bắt đầu lớn hơn kỳ kết thúc hoặc khoảng thời gian không hợp lệ!', ui.ButtonSet.OK);
+    ui.alert('⚠️ Lỗi Khoảng Thời Gian', 'Khoảng thời gian không hợp lệ!', ui.ButtonSet.OK);
     return;
   }
 
-  // Hàm helper hiển thị toast ở góc phải dưới màn hình Google Sheets
-  const progressToast = (msg, title = "Batch Giá Trị Tồn Kho") => {
-    ss.toast(msg, title, 6);
-  };
-
-  progressToast(`🚀 Bắt đầu chạy batch tồn kho từ ${startPeriod} đến ${endPeriod} (${periods.length} kỳ)...`, "Khởi động");
-  SpreadsheetApp.flush();
-
-  let successCount = 0;
-  let errorLog = [];
-
-  // 4. Thực thi tuần tự từng kỳ với cơ chế bẫy lỗi độc lập cho từng tháng
   try {
+    SpreadsheetApp.getActiveSpreadsheet().toast(`Đang chạy batch số lượng ${periods.length} kỳ...`, 'Hệ thống');
     for (let i = 0; i < periods.length; i++) {
-      const targetPeriod = periods[i];
-      progressToast(`⏳ Đang xử lý kỳ [ ${targetPeriod} ] (${i + 1}/${periods.length})...`);
-      
-      try {
-        StockEngine.calculateValueSummary(targetPeriod, true);
-        successCount++;
-      } catch (err) {
-        errorLog.push(`Kỳ ${targetPeriod}: ${err.message}`);
-      }
+      StockEngine.calculateQtySummary(periods[i]);
     }
-
     SpreadsheetApp.flush();
-
-    // 5. Báo cáo tổng kết cuối cùng
-    let summaryMsg = `Đã hoàn thành chạy batch tồn kho từ ${startPeriod} đến ${endPeriod}.\n- Thành công: ${successCount}/${periods.length} kỳ.`;
-    
-    if (errorLog.length > 0) {
-      summaryMsg += `\n\n- Phát sinh lỗi tại các kỳ:\n${errorLog.join("\n")}`;
-      ui.alert('⚠️ Hoàn Tất Có Cảnh Báo', summaryMsg, ui.ButtonSet.OK);
-    } else {
-      progressToast(`✨ Đã chạy batch thành công toàn bộ ${successCount} kỳ tồn kho!`, "Hoàn tất");
-      ui.alert('✅ Hoàn Tất Thành Công', summaryMsg, ui.ButtonSet.OK);
-    }
-
-  } catch (e) {
-    ui.alert(
-      '❌ Lỗi Hệ Thống', 
-      `Quá trình chạy batch bị gián đoạn toàn cục: ${e.message}`, 
-      ui.ButtonSet.OK
-    );
+    ui.alert('✅ Hoàn Tất', `Đã chạy xong số lượng kho từ ${startPeriod} đến ${endPeriod}.`, ui.ButtonSet.OK);
+  } catch (err) {
+    ui.alert('❌ Lỗi Batch', err.message, ui.ButtonSet.OK);
   }
 }
 
+
 /**
- * Giao diện chạy độc lập tính giá trị tồn kho
+ * 2. QUẢN LÝ ĐƠN GIÁ (Chỉ chạy Đơn lẻ cho từng kỳ để bảo đảm tính chính xác phụ thuộc)
  */
-function runStockEngineValue() {
+function runMonthlyAvgPrice() {
   const ui = SpreadsheetApp.getUi();
-  const response = ui.prompt('Kiểm tra Đơn giá Tức thì', 'Nhập kỳ tính toán (Định dạng YYYY-MM):', ui.ButtonSet.OK_CANCEL);
+  const response = ui.prompt('🔍 Kiểm tra Đơn giá Tức thì / Check NCC', 'Nhập kỳ tính toán (Định dạng YYYY-MM):', ui.ButtonSet.OK_CANCEL);
   
   if (response.getSelectedButton() === ui.Button.OK) {
     const period = response.getResponseText().trim();
     if (!period) return;
 
-    // Quy tắc xác thực định dạng kỳ (YYYY-MM)
     const periodRegex = /^\d{4}-(?:0[1-9]|1[0-2])$/;
     if (!periodRegex.test(period)) {
-      ui.alert('Lỗi: Định dạng kỳ không hợp lệ! Vui lòng nhập theo chuẩn YYYY-MM (Ví dụ: 2026-08).');
+      ui.alert('Lỗi: Định dạng kỳ không hợp lệ! Vui lòng nhập theo chuẩn YYYY-MM.');
       return;
     }
 
     try {
-      StockEngine.calculateValueSummary(period);
-      ui.alert(`Đã cập nhật bảng INVENTORY_VALUE_SUMMARY cho kỳ ${period}.`);
+      SpreadsheetApp.getActiveSpreadsheet().toast(`Đang chạy kiểm tra đơn giá tức thì kỳ ${period}...`, 'Hệ thống');
+      AvgPriceEngine.monthly_avg_price(period);
+      ui.alert(`✅ Đã cập nhật bảng MONTHLY_AVG_PRICE cho kỳ ${period}.`);
     } catch (err) {
-      ui.alert(`Lỗi: ${err.message}`);
+      ui.alert(`❌ Lỗi: ${err.message}`);
     }
   }
 }
 
 
+/**
+ * Hàm giao diện Entry Point chạy hàng loạt Đơn giá bình quân tháng cho nhiều kỳ
+ */
+function runBatchMonthlyAvgPrice() {
+  let ui;
+  try {
+    ui = SpreadsheetApp.getUi();
+  } catch (e) {
+    console.warn("Hàm này cần được chạy trực tiếp từ giao diện Google Sheets.");
+    return;
+  }
+  
+  const response = ui.prompt(
+    '🔄 Chạy Hàng Loạt Đơn Giá Bình Quân Tháng', 
+    'Nhập khoảng kỳ cần chạy theo định dạng [Kỳ Bắt Đầu] đến [Kỳ Kết Thúc]\n(Ví dụ: 2026-03 đến 2026-08):', 
+    ui.ButtonSet.OK_CANCEL
+  );
+  
+  if (response.getSelectedButton() !== ui.Button.OK) return;
+  
+  const inputVal = response.getResponseText().trim();
+  if (!inputVal) return;
 
-/** Entry Point gọi từ Menu UI để khởi tạo định mức từ ITEM_MASTER */
-function runInitRecipeBom() {
-  recipeBomInitFromItemMaster();
+  const periodRegex = /^\d{4}-(?:0[1-9]|1[0-2])$/;
+  let periodsToRun = [];
+
+  // Tìm tất cả các định dạng YYYY-MM xuất hiện trong chuỗi người dùng nhập
+  const matches = inputVal.match(/\d{4}-\d{2}/g);
+
+  if (matches && matches.length >= 2) {
+    // Nếu tìm thấy từ 2 mốc thời gian trở lên (Ví dụ: 2026-03 và 2026-08) -> Hiểu là chạy một khoảng
+    let [yStart, mStart] = matches[0].split('-').map(Number);
+    let [yEnd, mEnd] = matches[1].split('-').map(Number);
+    
+    let currentY = yStart;
+    let currentM = mStart;
+    
+    while (currentY < yEnd || (currentY === yEnd && currentM <= mEnd)) {
+      periodsToRun.push(`${currentY}-${String(currentM).padStart(2, '0')}`);
+      currentM++;
+      if (currentM > 12) {
+        currentM = 1;
+        currentY++;
+      }
+    }
+  } else if (matches && matches.length === 1) {
+    // Nếu chỉ nhập 1 kỳ duy nhất đúng chuẩn
+    if (periodRegex.test(matches[0])) {
+      periodsToRun.push(matches[0]);
+    }
+  }
+
+  // Fallback kiểm tra thô nếu người dùng gõ trực tiếp 1 kỳ đơn lẻ
+  if (periodsToRun.length === 0 && periodRegex.test(inputVal)) {
+    periodsToRun.push(inputVal);
+  }
+
+  if (periodsToRun.length === 0) {
+    ui.alert('❌ Lỗi: Không nhận diện được định dạng kỳ hợp lệ! Vui lòng nhập theo chuẩn YYYY-MM (Ví dụ: 2026-03 đến 2026-06).');
+    return;
+  }
+
+  let successCount = 0;
+  let errorLog = [];
+
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    for (let i = 0; i < periodsToRun.length; i++) {
+      const period = periodsToRun[i];
+      ss.toast(`Đang xử lý kỳ ${period} (${i + 1}/${periodsToRun.length})...`, 'Hệ thống Batch', 5);
+      
+      try {
+        AvgPriceEngine.monthly_avg_price(period);
+        successCount++;
+      } catch (err) {
+        errorLog.push(`Kỳ ${period}: ${err.message}`);
+      }
+    }
+    
+    SpreadsheetApp.flush();
+    
+    let msg = `✅ Đã chạy hoàn tất hàng loạt!\n- Thành công: ${successCount}/${periodsToRun.length} kỳ.`;
+    if (errorLog.length > 0) {
+      msg += `\n- Có lỗi phát sinh:\n` + errorLog.join('\n');
+    }
+    ui.alert('Kết quả Chạy Batch MONTHLY_AVG_PRICE', msg, ui.ButtonSet.OK);
+
+} catch (err) {
+    ui.alert(`❌ Lỗi hệ thống Batch: ${err.message}`);
+  }
 }
 
-/** Entry Point gọi từ Menu UI để điền tên tự động cho RECIPE_BOM */
-function runPopulateRecipeBomNames() {
-  recipeBomPopulateNames();
+
+
+function runMonthlyPriceList() {
+  const ui = SpreadsheetApp.getUi();
+  const response = ui.prompt('💰 Chốt Giá Tháng Chính Thức (Đơn Lẻ)', 'Nhập kỳ tính toán (Định dạng YYYY-MM):', ui.ButtonSet.OK_CANCEL);
+  if (response.getSelectedButton() !== ui.Button.OK) return;
+  const period = response.getResponseText().trim();
+
+  if (!/^\d{4}-\d{2}$/.test(period)) {
+    ui.alert('Lỗi: Định dạng kỳ không hợp lệ! Dùng chuẩn YYYY-MM.');
+    return;
+  }
+
+  try {
+    SpreadsheetApp.getActiveSpreadsheet().toast(`Đang tính đơn giá tháng cho kỳ ${period}...`, 'Hệ thống');
+    AvgPriceEngine.monthly_price_list(period);
+    ui.alert(`✅ Đã hoàn tất chốt giá tháng và cập nhật Balance cho kỳ ${period}.`);
+  } catch (err) {
+    ui.alert(`❌ Lỗi: ${err.message}`);
+  }
 }
 
-/** Entry Point gọi từ Menu UI để dọn dẹp dòng trùng lặp trong RECIPE_BOM */
-function runCleanRecipeBomDuplicates() {
-  recipeBomCleanDuplicates();
+
+/**
+ * 3. QUẢN LÝ GIÁ TRỊ TỒN KHO (Chạy Đơn lẻ cho từng kỳ)
+ */
+function runStockEngineValue() {
+  const ui = SpreadsheetApp.getUi();
+  const response = ui.prompt('📦 Tính Giá Trị Tồn Kho (Đơn Lẻ)', 'Nhập kỳ tính toán (Định dạng YYYY-MM):', ui.ButtonSet.OK_CANCEL);
+  if (response.getSelectedButton() !== ui.Button.OK) return;
+  const period = response.getResponseText().trim();
+
+  if (!/^\d{4}-\d{2}$/.test(period)) {
+    ui.alert('Lỗi: Định dạng kỳ không hợp lệ! Dùng chuẩn YYYY-MM.');
+    return;
+  }
+
+  try {
+    SpreadsheetApp.getActiveSpreadsheet().toast(`Đang tính giá trị tồn kho kỳ ${period}...`, 'Hệ thống');
+    StockEngine.calculateValueSummary(period);
+    ui.alert(`✅ Đã cập nhật bảng INVENTORY_VALUE_SUMMARY cho kỳ ${period}.`);
+  } catch (err) {
+    ui.alert(`❌ Lỗi: ${err.message}`);
+  }
 }
 
 
+/**
+ * 4. CHẠY TOÀN TRÌNH PIPELINE (CHO 1 KỲ: QTY -> PRICE -> VALUE)
+ */
+function runBatchPipelineSinglePeriod() {
+  const ui = SpreadsheetApp.getUi();
+  const response = ui.prompt('⚡ Chạy Pipeline Full (1 Kỳ)', 'Nhập kỳ tính toán (Định dạng YYYY-MM):', ui.ButtonSet.OK_CANCEL);
+  
+  if (response.getSelectedButton() === ui.Button.OK) {
+    const period = response.getResponseText().trim();
+    if (!/^\d{4}-(?:0[1-9]|1[0-2])$/.test(period)) {
+      ui.alert('Lỗi: Định dạng kỳ không hợp lệ! Vui lòng dùng YYYY-MM.');
+      return;
+    }
+
+    try {
+      SpreadsheetApp.getActiveSpreadsheet().toast(`Đang chạy chuỗi toàn trình cho kỳ ${period}...`, 'Hệ thống');
+      StockEngine.calculateQtySummary(period);
+      AvgPriceEngine.monthly_price_list(period);
+      StockEngine.calculateValueSummary(period);
+
+      ui.alert(`✅ Thành công! Đã chạy chuẩn chuỗi (Qty -> Price -> Value) cho kỳ ${period}.`);
+    } catch (err) {
+      ui.alert(`❌ Đã xảy ra lỗi: ${err.message}`);
+    }
+  }
+}
 
 
-/** Entry Point gọi từ Menu UI để tính toán lại chi phí món ăn theo kỳ */
+// ============================================================================
+// ENTRY POINTS CÁC MODUL KHÁC
+// ============================================================================
+
+function runInitRecipeBom() { recipeBomInitFromItemMaster(); }
+function runPopulateRecipeBomNames() { recipeBomPopulateNames(); }
+function runCleanRecipeBomDuplicates() { recipeBomCleanDuplicates(); }
+
 function runCalculateMenuCost() {
   const ui = SpreadsheetApp.getUi();
-  const response = ui.prompt(
-    "📊 Tính Chi Phí Món Theo Kỳ", 
-    "Vui lòng nhập kỳ tra cứu đơn giá (VD: 2026-03):", 
-    ui.ButtonSet.OK_CANCEL
-  );
-
+  const response = ui.prompt("📊 Tính Chi Phí Món Theo Kỳ", "Nhập kỳ tra cứu (VD: 2026-03):", ui.ButtonSet.OK_CANCEL);
   if (response.getSelectedButton() === ui.Button.OK) {
     const period = response.getResponseText().trim();
-    if (period) {
-      menuCalculateCost(period);
-    } else {
-      ui.alert("⚠️ Cảnh báo", "Kỳ tra cứu không được để trống!", ui.ButtonSet.OK);
-    }
+    if (period) menuCalculateCost(period);
+    else ui.alert("⚠️ Cảnh báo", "Kỳ không được để trống!", ui.ButtonSet.OK);
   }
 }
 
-
-
-
-/** Entry Point gọi từ Menu UI để chạy chốt snapshot cost món theo kỳ */
 function runSaveMenuCostSnapshot() {
   const ui = SpreadsheetApp.getUi();
-  const response = ui.prompt(
-    "📸 Chốt Snapshot Cost Món Theo Kỳ", 
-    "Vui lòng nhập kỳ báo cáo (VD: 2026-03):", 
-    ui.ButtonSet.OK_CANCEL
-  );
-
+  const response = ui.prompt("📸 Chốt Snapshot Cost", "Nhập kỳ báo cáo (VD: 2026-03):", ui.ButtonSet.OK_CANCEL);
   if (response.getSelectedButton() === ui.Button.OK) {
     const period = response.getResponseText().trim();
-    if (period) {
-      menuSaveCostSnapshot(period);
-    } else {
-      ui.alert("⚠️ Cảnh báo", "Kỳ báo cáo không được để trống!", ui.ButtonSet.OK);
-    }
+    if (period) menuSaveCostSnapshot(period);
+    else ui.alert("⚠️ Cảnh báo", "Kỳ không được để trống!", ui.ButtonSet.OK);
   }
 }
 
-
-
-/**
- * Entry Point gọi từ Menu UI để đồng bộ và tổng hợp chi phí (EXPENSE) từ Transaction theo kỳ.
- */
 function runExpenseSyncFromTransaction() {
   const ui = SpreadsheetApp.getUi();
-  const response = ui.prompt(
-    "💰 Đồng Bộ Chi Phí (EXPENSE)", 
-    "Vui lòng nhập kỳ hạch toán cần tổng hợp (Định dạng YYYY-MM, VD: 2026-08):", 
-    ui.ButtonSet.OK_CANCEL
-  );
-
+  const response = ui.prompt("💰 Đồng Bộ Chi Phí (EXPENSE)", "Nhập kỳ hạch toán (YYYY-MM):", ui.ButtonSet.OK_CANCEL);
   if (response.getSelectedButton() === ui.Button.OK) {
     const period = response.getResponseText().trim();
-    
-    // Validate định dạng YYYY-MM
     if (!/^\d{4}-\d{2}$/.test(period)) {
-      ui.alert(
-        "⚠️ Lỗi Định Dạng", 
-        "Kỳ hạch toán không hợp lệ. Vui lòng nhập đúng định dạng YYYY-MM (VD: 2026-08).", 
-        ui.ButtonSet.OK
-      );
+      ui.alert("⚠️ Lỗi Định Dạng", "Dùng chuẩn YYYY-MM.", ui.ButtonSet.OK);
       return;
     }
-
     try {
-      SpreadsheetApp.getActiveSpreadsheet().toast(`Đang tổng hợp chi phí EXPENSE cho kỳ ${period}...`, 'Hệ thống');
-      SpreadsheetApp.flush();
-
-      // Gọi hàm Core đã viết trong module EXPENSE
       expenseSyncFromTransaction(period);
-
+      ui.alert("✅ Thành công", `Đã đồng bộ EXPENSE kỳ ${period}`, ui.ButtonSet.OK);
     } catch (error) {
-      ui.alert(
-        "❌ Lỗi Thực Thi", 
-        `Đã xảy ra lỗi trong quá trình đồng bộ EXPENSE:\n\n${error.message}`, 
-        ui.ButtonSet.OK
-      );
+      ui.alert("❌ Lỗi", error.message, ui.ButtonSet.OK);
     }
   }
 }
 
-
-
-/**
- * Entry Point gọi từ Menu UI để chạy tính tiêu hao lý thuyết thông qua TheoreticalEngine
- */
 function runCalculateTheoreticalUsage() {
   const ui = SpreadsheetApp.getUi();
-  const response = ui.prompt(
-    "📊 Tính Tiêu Hao Lý Thuyết", 
-    "Vui lòng nhập kỳ báo cáo (Định dạng YYYY-MM, VD: 2026-08):", 
-    ui.ButtonSet.OK_CANCEL
-  );
-
+  const response = ui.prompt("📊 Tính Tiêu Hao Lý Thuyết", "Nhập kỳ báo cáo (YYYY-MM):", ui.ButtonSet.OK_CANCEL);
   if (response.getSelectedButton() === ui.Button.OK) {
     const period = response.getResponseText().trim();
     if (!/^\d{4}-\d{2}$/.test(period)) {
-      ui.alert("⚠️ Lỗi Định Dạng", "Kỳ không hợp lệ. Vui lòng nhập theo chuẩn YYYY-MM.", ui.ButtonSet.OK);
+      ui.alert("⚠️ Lỗi Định Dạng", "Dùng chuẩn YYYY-MM.", ui.ButtonSet.OK);
       return;
     }
     try {
-      SpreadsheetApp.getActiveSpreadsheet().toast(`Đang tính tiêu hao lý thuyết kỳ ${period}...`, 'Hệ thống');
       TheoreticalEngine.calculateUsage(period);
     } catch (err) {
-      ui.alert("❌ Lỗi thực thi", err.message, ui.ButtonSet.OK);
+      ui.alert("❌ Lỗi", err.message, err.message, ui.ButtonSet.OK);
     }
+  }
+}
+
+function runOpeningBalanceDialog() {
+  const ui = SpreadsheetApp.getUi();
+  const targetResponse = ui.prompt('Bước 1/2: Kỳ đích', 'Nhập kỳ nhận số dư (YYYY-MM):', ui.ButtonSet.OK_CANCEL);
+  if (targetResponse.getSelectedButton() !== ui.Button.OK) return;
+  const targetPeriod = targetResponse.getResponseText().trim();
+
+  const sourceResponse = ui.prompt('Bước 2/2: Kỳ nguồn', 'Nhập kỳ nguồn lấy số liệu (YYYY-MM):', ui.ButtonSet.OK_CANCEL);
+  if (sourceResponse.getSelectedButton() !== ui.Button.OK) return;
+  const sourcePeriod = sourceResponse.getResponseText().trim();
+
+  try {
+    StockEngine.generateOpeningBalance(targetPeriod, sourcePeriod);
+    ui.alert("✅ Thành công", `Đã kết chuyển số dư từ ${sourcePeriod} sang ${targetPeriod}`, ui.ButtonSet.OK);
+  } catch (error) {
+    ui.alert('❌ Lỗi', error.message, ui.ButtonSet.OK);
   }
 }

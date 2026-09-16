@@ -50,10 +50,7 @@ function transactionAssignItemCodeToAllSheets() {
     const codeVal = mappingData[i][idxMappingCode] ? mappingData[i][idxMappingCode].toString().trim() : "";
 
     if (rawVal && codeVal) {
-      // Tìm nhóm nguồn tương ứng từ bảng tbl_raw_source_group.
-      // Nếu không khai báo trong bảng thì fallback giữ nguyên giá trị sourceVal.
       const sourceGroup = dynamicSourceGroupMap.get(sourceVal) || sourceVal;
-      
       const compositeKey = `${rawVal}|${sourceGroup}`;
       codeLookupMap.set(compositeKey, codeVal);
     }
@@ -66,11 +63,19 @@ function transactionAssignItemCodeToAllSheets() {
 
   let totalUpdatedSheets = 0;
   let totalUpdatedRows = 0;
+  
+  // [CẢI TIẾN] Mảng lưu chi tiết kết quả từng sheet để thông báo rõ ràng
+  const detailReport = [];
 
   // 4. DUYỆT TẤT CẢ CÁC SHEET GIAO DỊCH RAW
   Object.keys(schemaMap).forEach(schemaName => {
-    // Bỏ qua các bảng hệ thống
     if (schemaName === "MAPPING" || schemaName === "SCHEMA" || schemaName === "RAW_SOURCE_GROUP" || schemaName === "ITEM_MASTER") return;
+
+    // CHỈ CHO PHÉP 3 NGUỒN GIAO DỊCH CHÍNH THEO YÊU CẦU TRƯỚC ĐÓ
+    const schemaUpper = schemaName.toUpperCase();
+    if (schemaUpper !== "TRANSACTION" && schemaUpper !== "STOCKTAKE" && schemaUpper !== "STOCK_TAKE" && schemaUpper !== "SALES") {
+      return;
+    }
 
     const idxSourceRaw  = schemaGetColIndex(schemaMap, schemaName, "raw_name");
     const idxSourceCode = schemaGetColIndex(schemaMap, schemaName, "item_code");
@@ -87,7 +92,6 @@ function transactionAssignItemCodeToAllSheets() {
     const rangeRaw = targetSheet.getRange(2, idxSourceRaw + 1, lastRow - 1, 1).getValues();
     const rangeCode = targetSheet.getRange(2, idxSourceCode + 1, lastRow - 1, 1).getValues();
 
-    // Tra cứu source_group cho Sheet hiện tại theo schema_name hoặc sheet_name
     const currentSchemaLower = schemaName.toLowerCase();
     const currentSheetLower  = targetSheetName.toLowerCase();
     const currentSourceGroup = dynamicSourceGroupMap.get(currentSchemaLower) || dynamicSourceGroupMap.get(currentSheetLower) || currentSchemaLower;
@@ -118,16 +122,20 @@ function transactionAssignItemCodeToAllSheets() {
 
       totalUpdatedSheets++;
       totalUpdatedRows += sheetUpdatedCount;
+      
+      // Ghi nhận chi tiết cho từng sheet
+      detailReport.py ? null : detailReport.push(`• Sheet [${targetSheetName}] (${schemaName}): Cập nhật ${sheetUpdatedCount} dòng.`);
+      // Hoặc viết gọn:
+      detailReport.push(`• Sheet "${targetSheetName}": ${sheetUpdatedCount} dòng`);
     }
   });
 
-  // 6. THÔNG BÁO KẾT QUẢ
+  // 6. THÔNG BÁO KẾT QUẢ CHI TIẾT VÀ RÕ RÀNG
   if (totalUpdatedRows > 0) {
-    ui.alert(
-      "✅ Hoàn thành",
-      `Đã cập nhật thành công ${totalUpdatedRows} dòng mã SKU trên ${totalUpdatedSheets} sheet giao dịch.`,
-      ui.ButtonSet.OK
-    );
+    let message = `✅ Đã cập nhật tổng cộng ${totalUpdatedRows} dòng mã SKU trên ${totalUpdatedSheets} sheet giao dịch:\n\n`;
+    message += detailReport.join("\n");
+    
+    ui.alert("Kết quả cập nhật mã SKU", message, ui.ButtonSet.OK);
   } else {
     ui.alert(
       "ℹ️ Thông báo",

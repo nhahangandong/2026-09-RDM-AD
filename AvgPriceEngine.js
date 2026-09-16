@@ -1,13 +1,14 @@
 /**
  * Module AvgPriceEngine: Tính toán đơn giá bình quân gia quyền và quản lý danh mục giá.
+ * Tuân thủ quy ước: Upsert dữ liệu, tuyệt đối không xóa bảng (clear), không ghi đè LOCATION_ITEM_BALANCE.
  */
 class AvgPriceEngine {
 
   /**
    * Hàm 1: monthly_avg_price - Tính giá bình quân giao dịch tức thời cho kỳ hiện tại
-   * Ưu tiên lấy raw_name và total_amount chuẩn từ TRANSACTION.
+   * Ưu tiên lấy raw_name và total_amount chuẩn từ TRANSACTION theo cơ chế Upsert.
    */
-static monthly_avg_price(periodTarget) {
+  static monthly_avg_price(periodTarget) {
     const ss = SpreadsheetApp.getActiveSpreadsheet();
     const tz = ss.getSpreadsheetTimeZone();
     const schemaMap = schemaGetMap();
@@ -42,7 +43,7 @@ static monthly_avg_price(periodTarget) {
     const idxTransAmount   = getIdx(S_TRANS, "total_amount");
     const idxTransRawName  = getIdx(S_TRANS, "raw_name");
     const idxTransBaseUnit = getIdx(S_TRANS, "base_unit");
-    const idxTransCategory = getIdx(S_TRANS, "category"); // Lấy nhóm hàng nếu đã fill sẵn trong transaction
+    const idxTransCategory = getIdx(S_TRANS, "category");
 
     for (let i = 1; i < dataTrans.length; i++) {
       const row = dataTrans[i];
@@ -71,7 +72,6 @@ static monthly_avg_price(periodTarget) {
         const bUnit = idxTransBaseUnit !== -1 ? String(row[idxTransBaseUnit] || "").trim() : "";
         const cCat  = idxTransCategory !== -1 ? String(row[idxTransCategory] || "").trim() : "";
 
-        // Ưu tiên lưu thông tin trực tiếp từ transaction
         if (!itemDynamicInfo[itemCode]) {
           itemDynamicInfo[itemCode] = { name: rName, unit: bUnit, category: cCat };
         } else {
@@ -82,8 +82,12 @@ static monthly_avg_price(periodTarget) {
       }
     }
 
-    const cols = schemaMap[S_PRICE].columns;
-    const headers = cols.map(c => c.colHeader || c.colKey);
+    const priceCols = schemaMap[S_PRICE].columns.sort((a, b) => a.colIndex - b.colIndex);
+    const maxColIndex = Math.max(...priceCols.map(c => c.colIndex));
+    const headers = new Array(maxColIndex);
+    priceCols.forEach(c => {
+      headers[c.colIndex - 1] = c.colHeader || c.colKey;
+    });
 
     let currentData = dataPrice;
     if (currentData.length === 0 || currentData[0][0] === "") {
@@ -93,6 +97,7 @@ static monthly_avg_price(periodTarget) {
     const idxPricePeriod = getIdx(S_PRICE, "period");
     const idxPriceItem   = getIdx(S_PRICE, "item_code");
 
+    // Lập bản đồ keyIndexMap để Upsert (Không xóa bảng)
     const keyIndexMap = {};
     for (let i = 1; i < currentData.length; i++) {
       const p = String(currentData[i][idxPricePeriod] || "").trim().replace(/\.0$/, '');
@@ -108,40 +113,46 @@ static monthly_avg_price(periodTarget) {
       const unitPrice = totalQty > 0 ? (totalAmt / totalQty) : 0;
 
       const dynamic = itemDynamicInfo[itemCode] || {};
-      
       const itemName = dynamic.name || "N/A";
       const baseUnit = dynamic.unit || "N/A";
       const category = dynamic.category || "Chưa phân nhóm";
 
       const fullKey = `${strPeriod}_${itemCode}`;
-      const rowValues = new Array(cols.length);
+      const rowValues = new Array(maxColIndex).fill("");
 
-      rowValues[getIdx(S_PRICE, "period")]        = strPeriod;
-      rowValues[getIdx(S_PRICE, "item_code")]     = itemCode;
-      rowValues[getIdx(S_PRICE, "raw_name")]     = itemName; // Khớp đúng với col_key trong schema của MONTHLY_AVG_PRICE
-      rowValues[getIdx(S_PRICE, "base_unit")]     = baseUnit;
-      rowValues[getIdx(S_PRICE, "inbound_qty")]   = totalQty;
-      rowValues[getIdx(S_PRICE, "inbound_amount")]  = totalAmt;
-      rowValues[getIdx(S_PRICE, "unit_price")]    = unitPrice;
-      rowValues[getIdx(S_PRICE, "price_source")]  = "PURCHASE_AVG";
-      rowValues[getIdx(S_PRICE, "category")]      = category;
-      rowValues[getIdx(S_PRICE, "updated_at")]    = nowStr;
+      priceCols.forEach(col => {
+        const colIdx = col.colIndex - 1;
+        switch (col.colKey) {
+          case "period":        rowValues[colIdx] = strPeriod; break;
+          case "item_code":     rowValues[colIdx] = itemCode; break;
+          case "raw_name":      rowValues[colIdx] = itemName; break;
+          case "base_unit":     rowValues[colIdx] = baseUnit; break;
+          case "inbound_qty":   rowValues[colIdx] = totalQty; break;
+          case "inbound_amount":rowValues[colIdx] = totalAmt; break;
+          case "unit_price":    rowValues[colIdx] = unitPrice; break;
+          case "price_source":  rowValues[colIdx] = "PURCHASE_AVG"; break;
+          case "category":      rowValues[colIdx] = category; break;
+          case "updated_at":    rowValues[colIdx] = nowStr; break;
+          default:              rowValues[colIdx] = ""; break;
+        }
+      });
 
       if (keyIndexMap[fullKey] !== undefined) {
         currentData[keyIndexMap[fullKey]] = rowValues;
       } else {
         currentData.push(rowValues);
+        keyIndexMap[fullKey] = currentData.length - 1;
       }
     });
 
-    sPrice.getRange(1, 1, currentData.length, cols.length).setValues(currentData);
+    sPrice.getRange(1, 1, currentData.length, maxColIndex).setValues(currentData);
     SpreadsheetApp.flush();
   }
 
 
   /**
    * Hàm 2: monthly_price_list - Tính giá bình quân chốt tồn kho cuối tháng
-   * Giá trị được ghi đồng thời vào 2 sheet kỳ N vào monthly_price_list, kỳ N + 1 vào Balance_Opening.
+   * Ghi nhận vào MONTHLY_PRICE_LIST theo chuẩn Upsert, vét đầy đủ mã từ Transaction, Stocktake/Qty Summary, Lịch sử và Master.
    */
   static monthly_price_list(periodTarget) {
     const ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -155,26 +166,27 @@ static monthly_avg_price(periodTarget) {
     const S_TRANS = "TRANSACTION";
     const S_ITEM  = "ITEM_MASTER";
     const S_PRICE = "MONTHLY_PRICE_LIST";
-    const S_BAL   = "LOCATION_ITEM_BALANCE";
+    const S_QTY   = "INVENTORY_QTY_SUMMARY"; // Bổ sung schema Qty Summary để vét mã stocktake/tồn kho
 
     const sTransName = schemaGetSheetName(schemaMap, S_TRANS);
     const sItemName  = schemaGetSheetName(schemaMap, S_ITEM);
     const sPriceName = schemaGetSheetName(schemaMap, S_PRICE);
-    const sBalName   = schemaGetSheetName(schemaMap, S_BAL);
+    const sQtyName   = schemaGetSheetName(schemaMap, S_QTY);
 
     const sTrans  = sTransName ? ss.getSheetByName(sTransName) : null;
     const sItem   = sItemName ? ss.getSheetByName(sItemName) : null;
     const sPrice  = sPriceName ? ss.getSheetByName(sPriceName) : null;
-    const sBal    = sBalName ? ss.getSheetByName(sBalName) : null;
+    const sQty    = sQtyName ? ss.getSheetByName(sQtyName) : null;
 
-    if (!sPrice || !sBal) throw new Error("Không tìm thấy sheet MONTHLY_PRICE_LIST hoặc BALANCE_OPENING theo cấu trúc SCHEMA.");
+    if (!sPrice) throw new Error("Không tìm thấy sheet MONTHLY_PRICE_LIST theo cấu trúc SCHEMA.");
 
     const dataTrans  = sTrans ? sTrans.getDataRange().getValues() : [];
     const dataItem   = sItem ? sItem.getDataRange().getValues() : [];
     const dataPrice  = sPrice ? sPrice.getDataRange().getValues() : [];
-    const dataBal    = sBal ? sBal.getDataRange().getValues() : [];
+    const dataQty    = sQty ? sQty.getDataRange().getValues() : [];
 
     const strPeriod = String(periodTarget).trim();
+    const targetPeriodClean = strPeriod.replace(/[-\/]/g, '');
     const getIdx = (sName, cKey) => schemaGetColIndex(schemaMap, sName, cKey);
 
     // 1. Tải danh mục ITEM_MASTER (chỉ lọc source_group === 'INVENTORY')
@@ -241,7 +253,7 @@ static monthly_avg_price(periodTarget) {
     for (let i = 1; i < dataTrans.length; i++) {
       const row = dataTrans[i];
       const transPeriod = String(row[idxTransPeriod] || "").trim().replace(/\.0$/, '').replace(/[-\/]/g, '');
-      if (transPeriod !== strPeriod.replace(/[-\/]/g, '')) continue;
+      if (transPeriod !== targetPeriodClean) continue;
 
       const itemCode = cleanCodeValue_(row[idxTransItem]);
       const fromCode = cleanCodeValue_(row[idxTransFromCode]);
@@ -273,19 +285,40 @@ static monthly_avg_price(periodTarget) {
       }
     }
 
-    // 4. Chuẩn bị cấu trúc headers vật lý cho MONTHLY_PRICE_LIST
+    // 4. VÉT BỔ SUNG: Quét từ INVENTORY_QTY_SUMMARY (hoặc stocktake/tồn kho trong kỳ) để không sót mã hàng phát sinh tồn kho/kiểm kê
+    const activeItemCodes = new Set(Object.keys(mapInboundQty));
+    Object.keys(mapHistoricalPrice).forEach(k => activeItemCodes.add(k));
+    Object.keys(mapItemMaster).forEach(k => {
+      if (mapItemMaster[k].costPrice > 0) activeItemCodes.add(k);
+    });
+
+    if (dataQty.length > 1) {
+      const idxQtyPeriod = getIdx(S_QTY, "period");
+      const idxQtyItem   = getIdx(S_QTY, "item_code");
+
+      for (let i = 1; i < dataQty.length; i++) {
+        const row = dataQty[i];
+        const qtyPeriod = String(row[idxQtyPeriod] || "").trim().replace(/\.0$/, '').replace(/[-\/]/g, '');
+        if (qtyPeriod === targetPeriodClean) {
+          const itemCode = cleanCodeValue_(row[idxQtyItem]);
+          if (itemCode) {
+            activeItemCodes.add(itemCode);
+          }
+        }
+      }
+    }
+
+    // 5. Chuẩn bị cấu trúc headers vật lý cho MONTHLY_PRICE_LIST
     const priceCols = schemaMap[S_PRICE].columns.sort((a, b) => a.colIndex - b.colIndex);
     const maxColIndex = Math.max(...priceCols.map(c => c.colIndex));
     const headers = new Array(maxColIndex);
     priceCols.forEach(c => {
-      headers[c.colIndex - 1] = c.colHeader;
+      headers[c.colIndex - 1] = c.colHeader || c.colKey;
     });
 
     let currentPriceData = dataPrice;
     if (currentPriceData.length === 0 || currentPriceData[0][0] === "") {
       currentPriceData = [headers];
-    } else {
-      currentPriceData[0] = headers;
     }
 
     const keyIndexMap = {};
@@ -298,32 +331,14 @@ static monthly_avg_price(periodTarget) {
     }
 
     const nowStr = Utilities.formatDate(new Date(), tz, "yyyy-MM-dd HH:mm:ss");
-    const mapUnitPrice = {};
 
-    // 5. Gom tất cả các mã cần xử lý từ nhiều nguồn (Transaction, Lịch sử, Master, Balance Kỳ N và Kỳ N+1)
-    const activeItemCodes = new Set(Object.keys(mapInboundQty));
-    Object.keys(mapHistoricalPrice).forEach(k => activeItemCodes.add(k));
-    Object.keys(mapItemMaster).forEach(k => {
-      if (mapItemMaster[k].costPrice > 0) activeItemCodes.add(k);
-    });
-
-    // Vét thêm từ BALANCE_OPENING của cả kỳ hiện tại (N) và kỳ kế tiếp (N+1) để tránh bỏ sót mã bị trễ/lọt sổ
-    const targetPeriodClean = strPeriod.replace(/[-\/]/g, '');
-    const nextPeriodClean = getNextPeriod_(strPeriod).replace(/[-\/]/g, '');
-    
-    const idxBalPeriod = getIdx(S_BAL, "period");
-    const idxBalItem   = getIdx(S_BAL, "item_code");
-
-    for (let i = 1; i < dataBal.length; i++) {
-      const p = String(dataBal[i][idxBalPeriod] || "").trim().replace(/\.0$/, '').replace(/[-\/]/g, '');
-      if (p === targetPeriodClean || p === nextPeriodClean) {
-        const itemCode = cleanCodeValue_(dataBal[i][idxBalItem]);
-        if (itemCode) activeItemCodes.add(itemCode);
-      }
-    }
-
+    // 6. Xử lý tính toán đơn giá cho toàn bộ activeItemCodes đã được vét đầy đủ
     activeItemCodes.forEach(itemCode => {
-      if (!mapItemMaster[itemCode]) return; 
+      // Nếu mã hoàn toàn không có trong master hệ thống, có thể cân nhắc bỏ qua hoặc tạo mới tùy nhu cầu, 
+      // nhưng ở đây ưu tiên các mã có trong master hoặc đã phát sinh giao dịch/tồn kho.
+      if (!mapItemMaster[itemCode]) {
+        mapItemMaster[itemCode] = { name: itemCode, category: "Chưa phân nhóm", unit: "N/A", costPrice: 0 };
+      }
 
       const totalQty = mapInboundQty[itemCode] || 0;
       const totalAmt = mapInboundAmt[itemCode] || 0;
@@ -331,7 +346,7 @@ static monthly_avg_price(periodTarget) {
       let unitPrice = 0;
       let priceSource = "";
 
-      const master = mapItemMaster[itemCode] || {};
+      const master = mapItemMaster[itemCode];
       const dynamic = itemDynamicInfo[itemCode] || {};
 
       if (totalQty > 0) {
@@ -348,14 +363,12 @@ static monthly_avg_price(periodTarget) {
         priceSource = "FIXED_MASTER";
       }
 
-      mapUnitPrice[itemCode] = unitPrice;
-
-      const itemName = master.name || "N/A";
+      const itemName = master.name || itemCode;
       const baseUnit = master.unit || dynamic.unit || "N/A";
       const category = master.category || dynamic.category || "Chưa phân nhóm";
 
       const fullKey = `${targetPeriodClean}_${itemCode}`;
-      const rowValues = new Array(maxColIndex);
+      const rowValues = new Array(maxColIndex).fill("");
 
       priceCols.forEach(col => {
         const colIdx = col.colIndex - 1;
@@ -382,41 +395,8 @@ static monthly_avg_price(periodTarget) {
       }
     });
 
-    // 6. Ghi dữ liệu ra sheet MONTHLY_PRICE_LIST
+    // 7. Ghi dữ liệu ra sheet MONTHLY_PRICE_LIST theo chuẩn Upsert (Không xóa sạch bảng)
     sPrice.getRange(1, 1, currentPriceData.length, maxColIndex).setValues(currentPriceData);
-
-    // 7. Cập nhật ngược lại BALANCE_OPENING độc quyền cho KỲ KẾ TIẾP (nextPeriod)
-    const idxBalQty    = getIdx(S_BAL, "opening_qty");
-    const idxBalCost   = getIdx(S_BAL, "unit_cost");
-    const idxBalVal    = getIdx(S_BAL, "opening_value");
-    const idxBalDate   = getIdx(S_BAL, "updated_at");
-
-    let isBalUpdated = false;
-    for (let i = 1; i < dataBal.length; i++) {
-      const p = String(dataBal[i][idxBalPeriod] || "").trim().replace(/\.0$/, '').replace(/[-\/]/g, '');
-      
-      // Chỉ ghi nhận vào số dư đầu kỳ của KỲ KẾ TIẾP (ví dụ chạy tháng 7 -> cập nhật đầu kỳ tháng 8)
-      if (p === nextPeriodClean) {
-        const itemCode = cleanCodeValue_(dataBal[i][idxBalItem]);
-        const qty = Number(dataBal[i][idxBalQty]) || 0;
-        
-        if (mapUnitPrice[itemCode] !== undefined) {
-          const unitCost = mapUnitPrice[itemCode];
-          const totalVal = qty * unitCost;
-
-          if (idxBalCost !== -1) dataBal[i][idxBalCost] = unitCost;
-          if (idxBalVal !== -1)  dataBal[i][idxBalVal]  = totalVal;
-          if (idxBalDate !== -1) dataBal[i][idxBalDate] = nowStr;
-          
-          isBalUpdated = true;
-        }
-      }
-    }
-
-    if (isBalUpdated) {
-      sBal.getDataRange().setValues(dataBal);
-    }
-
     SpreadsheetApp.flush();
   }
 }

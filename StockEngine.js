@@ -1,33 +1,29 @@
 /**
- * Module StockEngine: Tính toán Tổng hợp Tồn kho (Số lượng) chuẩn Schema-driven.
- * Sử dụng bảng độc lập LOCATION_ITEM_BALANCE và lưu giá trị trực tiếp dạng số (không dùng công thức).
+ * Module StockEngine: Tính toán Tổng hợp Tồn kho (Số lượng & Giá trị) chuẩn Schema-driven.
+ * Hỗ trợ cơ chế Waterfall Pricing (Lùi kỳ lịch sử và Fallback Cost Price) và chạy Batch không ngắt quãng.
  */
 class StockEngine {
 
   /**
-   * Tính toán và Upsert dữ liệu tổng hợp tồn kho theo Kỳ (YYYY-MM)
+   * Tính toán và Upsert dữ liệu tổng hợp tồn kho theo Kỳ (YYYY-MM) - Số lượng
    * @param {string|number} periodTarget - Kỳ tính toán (Ví dụ: '2026-07', '2026-08')
    */
   static calculateQtySummary(periodTarget) {
     const ss = SpreadsheetApp.getActiveSpreadsheet();
     const tz = ss.getSpreadsheetTimeZone();
 
-    // Load bản đồ Schema
     const schemaMap = schemaGetMap();
     if (!schemaMap) throw new Error("Không thể tải cấu trúc SCHEMA từ hệ thống.");
 
-    // Tra cứu Route qua RouteEngine
     const locationTypeMap = RouteEngine.getLocationTypeMap(ss, schemaMap);
     const routeRulesMap   = RouteEngine.getRouteRulesMap(ss, schemaMap);
 
-    // Định nghĩa các Schema Key
     const S_IQ    = "INVENTORY_QTY_SUMMARY";
     const S_TRANS = "TRANSACTION";
     const S_STOCK = "STOCKTAKE";
     const S_ITEM  = "ITEM_MASTER";
     const S_BAL   = "LOCATION_ITEM_BALANCE";
 
-    // Lấy Sheets theo Schema Name
     const sIQ    = ss.getSheetByName(schemaGetSheetName(schemaMap, S_IQ));
     const sGD    = ss.getSheetByName(schemaGetSheetName(schemaMap, S_TRANS));
     const sKK    = ss.getSheetByName(schemaGetSheetName(schemaMap, S_STOCK));
@@ -45,14 +41,11 @@ class StockEngine {
     const strPeriod = String(periodTarget).trim();
     const getIdx = (sName, cKey) => schemaGetColIndex(schemaMap, sName, cKey);
 
-    // Khai báo đầy đủ các index cột cho INVENTORY_QTY_SUMMARY (S_IQ)
     const idxIQPeriod = getIdx(S_IQ, "period");
     const idxIQLoc    = getIdx(S_IQ, "location_code");
     const idxIQItem   = getIdx(S_IQ, "item_code");
 
-    // -------------------------------------------------------------
     // 1. TẢI DANH MỤC ITEM_MASTER
-    // -------------------------------------------------------------
     const mapItemMaster = {};
     if (dataItem.length > 1) {
       const idxItemCode = getIdx(S_ITEM, "item_code");
@@ -80,19 +73,43 @@ class StockEngine {
       if (!mapItemMaster[code].category && category) mapItemMaster[code].category = category;
     };
 
-    // -------------------------------------------------------------
-    // 2. NẠP TỒN ĐẦU KỲ TỪ BẢNG ĐỘC LẬP LOCATION_ITEM_BALANCE
-    // -------------------------------------------------------------
+    // 2. NẠP TỒN ĐẦU KỲ
     const mapOpeningQty = {};
-    const mapOpeningCost = {};
     const setKeys = new Set(); 
 
-    if (dataBal.length > 1) {
+    const [yStr, mStr] = strPeriod.split('-');
+    let prevYear = parseInt(yStr, 10);
+    let prevMonth = parseInt(mStr, 10) - 1;
+    if (prevMonth === 0) {
+      prevMonth = 12;
+      prevYear -= 1;
+    }
+    const prevPeriod = `${prevYear}-${String(prevMonth).padStart(2, '0')}`;
+
+    if (dataIQ.length > 1) {
+      const idxCloseQty = getIdx(S_IQ, "closing_qty");
+      for (let i = 1; i < dataIQ.length; i++) {
+        const row = dataIQ[i];
+        const p = String(row[idxIQPeriod] || "").trim().replace(/\.0$/, '');
+        if (p === prevPeriod) {
+          const loc = cleanCodeValue_(row[idxIQLoc]);
+          const item = cleanCodeValue_(row[idxIQItem]);
+          const qty = Number(row[idxCloseQty]) || 0;
+
+          if (qty > 0 && loc && item) {
+            const key = `${loc}:${item}`;
+            mapOpeningQty[key] = qty;
+            setKeys.add(key);
+          }
+        }
+      }
+    }
+
+    if (setKeys.size === 0 && dataBal.length > 1) {
       const idxBalPeriod = getIdx(S_BAL, "period");
       const idxBalLoc    = getIdx(S_BAL, "location_code");
       const idxBalItem   = getIdx(S_BAL, "item_code");
       const idxBalQty    = getIdx(S_BAL, "opening_qty");
-      const idxBalCost   = getIdx(S_BAL, "unit_cost");
 
       for (let i = 1; i < dataBal.length; i++) {
         const row = dataBal[i];
@@ -103,20 +120,16 @@ class StockEngine {
         if (p === strPeriod && loc && item) {
           const key = `${loc}:${item}`;
           const qty = Number(row[idxBalQty]) || 0;
-          const cost = Number(row[idxBalCost]) || 0;
 
           if (qty > 0) {
             mapOpeningQty[key] = qty;
-            mapOpeningCost[key] = cost;
             setKeys.add(key);
           }
         }
       }
     }
 
-    // -------------------------------------------------------------
-    // 3. TẬP HỢP CÁC GIAO DỊCH TRONG KỲ (TRANSACTION)
-    // -------------------------------------------------------------
+    // 3. TẬP HỢP GIAO DỊCH TRONG KỲ (TRANSACTION)
     const mapInbound = {};
     const mapAdjust  = {};
 
@@ -159,16 +172,16 @@ class StockEngine {
         }
       }
 
-      if (fromType === "PHYSICAL" && routeRule.transactionType === "TRANSFER") {
+      if (fromType === "PHYSICAL") {
         const keyFrom = `${fromCode}:${itemCode}`;
         setKeys.add(keyFrom);
-        mapAdjust[keyFrom] = (mapAdjust[keyFrom] || 0) - qty;
+        if (routeRule.transactionType === "TRANSFER") {
+          mapAdjust[keyFrom] = (mapAdjust[keyFrom] || 0) - qty;
+        }
       }
     }
 
-    // -------------------------------------------------------------
     // 4. TẬP HỢP KIỂM KÊ TỪ STOCKTAKE
-    // -------------------------------------------------------------
     const mapClosing = {};
     const hasStocktakeRecord = new Set();
 
@@ -206,12 +219,14 @@ class StockEngine {
       }
     }
 
-    // -------------------------------------------------------------
-    // 5. UPSERT VÀO BẢNG INVENTORY_QTY_SUMMARY & CHUYỂN KỲ KẾ TIẾP
-    // -------------------------------------------------------------
+    // 5. UPSERT VÀO BẢNG INVENTORY_QTY_SUMMARY
     let currentData = sIQ.getDataRange().getValues();
-    const cols = schemaMap[S_IQ].columns;
-    const headers = cols.map(c => c.colHeader || c.colKey);
+    const qtyCols = schemaMap[S_IQ].columns.sort((a, b) => a.colIndex - b.colIndex);
+    const maxColIndex = Math.max(...qtyCols.map(c => c.colIndex));
+    const headers = new Array(maxColIndex);
+    qtyCols.forEach(c => {
+      headers[c.colIndex - 1] = c.colHeader || c.colKey;
+    });
 
     if (currentData.length === 0 || currentData[0][0] === "") {
       currentData = [headers];
@@ -226,10 +241,6 @@ class StockEngine {
     }
 
     const nowStr = Utilities.formatDate(new Date(), tz, "yyyy-MM-dd HH:mm:ss");
-    
-    // Gọi hàm helper toàn cục getNextPeriod_ từ Utils.gs
-    const nextPeriod = getNextPeriod_(strPeriod);
-    const nextBalanceRowsToAdd = [];
 
     Array.from(setKeys).sort().forEach(key => {
       const splitIdx = key.indexOf(":");
@@ -244,43 +255,37 @@ class StockEngine {
       const adjustQty  = mapAdjust[key] || 0;
 
       let closingQty = 0;
+      let outboundQty = 0;
+
       if (hasStocktakeRecord.has(key)) {
         closingQty = mapClosing[key] || 0;
+        outboundQty = (openingQty + inboundQty + adjustQty) - closingQty;
       } else {
-        closingQty = openingQty + inboundQty + adjustQty;
+        closingQty = 0;
+        outboundQty = (openingQty + inboundQty + adjustQty) - closingQty;
       }
 
-      let outboundQty = (openingQty + inboundQty + adjustQty) - closingQty;
       if (outboundQty < 0) outboundQty = 0;
+      if (closingQty < 0) closingQty = 0;
 
-      if (closingQty > 0) {
-        const unitCost = mapOpeningCost[key] || 0;
-        const totalValue = closingQty * unitCost; // Lưu trực tiếp giá trị số để tối ưu hiệu suất, tránh lỗi công thức
+      const rowValues = new Array(maxColIndex).fill("");
+      qtyCols.forEach(col => {
+        const colIdx = col.colIndex - 1;
+        const cKey = col.colKey;
 
-        nextBalanceRowsToAdd.push([
-          nextPeriod, 
-          locCode, 
-          itemCode, 
-          closingQty, 
-          unitCost, 
-          totalValue, 
-          nowStr
-        ]);
-      }
-
-      const rowValues = new Array(cols.length);
-      rowValues[getIdx(S_IQ, "period")]        = strPeriod;
-      rowValues[getIdx(S_IQ, "location_code")]  = locCode;
-      rowValues[getIdx(S_IQ, "item_code")]      = itemCode;
-      rowValues[getIdx(S_IQ, "item_name")]      = master.name || "N/A";
-      rowValues[getIdx(S_IQ, "base_unit")]      = master.unit || "N/A";
-      rowValues[getIdx(S_IQ, "opening_qty")]   = openingQty;
-      rowValues[getIdx(S_IQ, "inbound_qty")]   = inboundQty;
-      rowValues[getIdx(S_IQ, "adjust_qty")]    = adjustQty;
-      rowValues[getIdx(S_IQ, "closing_qty")]   = closingQty;
-      rowValues[getIdx(S_IQ, "outbound_qty")]  = outboundQty;
-      rowValues[getIdx(S_IQ, "category")]      = master.category || "Chưa phân nhóm";
-      rowValues[getIdx(S_IQ, "updated_at")]    = nowStr;
+        if (cKey === "period") rowValues[colIdx] = strPeriod;
+        else if (cKey === "location_code") rowValues[colIdx] = locCode;
+        else if (cKey === "item_code") rowValues[colIdx] = itemCode;
+        else if (cKey === "item_name") rowValues[colIdx] = master.name || "N/A";
+        else if (cKey === "base_unit") rowValues[colIdx] = master.unit || "N/A";
+        else if (cKey === "opening_qty") rowValues[colIdx] = openingQty;
+        else if (cKey === "inbound_qty") rowValues[colIdx] = inboundQty;
+        else if (cKey === "adjust_qty") rowValues[colIdx] = adjustQty;
+        else if (cKey === "closing_qty") rowValues[colIdx] = closingQty;
+        else if (cKey === "outbound_qty") rowValues[colIdx] = outboundQty;
+        else if (cKey === "category") rowValues[colIdx] = master.category || "Chưa phân nhóm";
+        else if (cKey === "updated_at") rowValues[colIdx] = nowStr;
+      });
 
       if (keyIndexMap[fullKey] !== undefined) {
         currentData[keyIndexMap[fullKey]] = rowValues;
@@ -289,24 +294,19 @@ class StockEngine {
       }
     });
 
-    // Ghi dữ liệu vào Sheet INVENTORY_QTY_SUMMARY
-    sIQ.getRange(1, 1, currentData.length, cols.length).setValues(currentData);
-
-    // Gọi hàm helper toàn cục updateNextPeriodBalance_ từ Utils.gs
-    updateNextPeriodBalance_(ss, schemaMap, nextPeriod, nextBalanceRowsToAdd);
-
+    sIQ.clear({contentsOnly: true});
+    sIQ.getRange(1, 1, currentData.length, maxColIndex).setValues(currentData);
     SpreadsheetApp.flush();
   }
-}
+  
 
-
-
-/**
-* Hàm tính giá trị tồn kho dựa trên _qty và month_price_list
-*/
-
-class StockEngineValue {
-  static calculate(periodTarget) {
+  /**
+   * 2. Tính toán và tổng hợp giá trị tồn kho (Value Summary) 
+   * Áp dụng quy tắc Waterfall Price: Kỳ N -> Lùi kỳ lịch sử (N-1, N-2...) -> Fallback cost_price (Item Master)
+   * @param {string} periodTarget - Kỳ cần tính (VD: "2026-08")
+   * @param {boolean} isBatch - Cờ chỉ định có phải đang chạy hàng loạt hay không (true = ẩn popup tương tác)
+   */
+  static calculateValueSummary(periodTarget, isBatch = false) {
     const ss = SpreadsheetApp.getActiveSpreadsheet();
     const tz = ss.getSpreadsheetTimeZone();
     const schemaMap = schemaGetMap();
@@ -315,66 +315,121 @@ class StockEngineValue {
     const S_QTY   = "INVENTORY_QTY_SUMMARY";
     const S_PRICE = "MONTHLY_PRICE_LIST";
     const S_VAL   = "INVENTORY_VALUE_SUMMARY";
+    const S_ITEM  = "ITEM_MASTER";
 
-    const sQtyName   = schemaGetSheetName(schemaMap, S_QTY);
-    const sPriceName = schemaGetSheetName(schemaMap, S_PRICE);
-    const sValName   = schemaGetSheetName(schemaMap, S_VAL);
-
-    const sQty   = sQtyName ? ss.getSheetByName(sQtyName) : null;
-    const sPrice = sPriceName ? ss.getSheetByName(sPriceName) : null;
-    const sVal   = sValName ? ss.getSheetByName(sValName) : null;
+    const sQty   = ss.getSheetByName(schemaGetSheetName(schemaMap, S_QTY));
+    const sPrice = ss.getSheetByName(schemaGetSheetName(schemaMap, S_PRICE));
+    const sVal   = ss.getSheetByName(schemaGetSheetName(schemaMap, S_VAL));
+    const sItem  = ss.getSheetByName(schemaGetSheetName(schemaMap, S_ITEM));
 
     if (!sQty || !sPrice || !sVal) {
-      throw new Error("Không tìm thấy đủ các sheet yêu cầu (INVENTORY_QTY_SUMMARY, MONTHLY_PRICE_LIST, INVENTORY_VALUE_SUMMARY) theo SCHEMA.");
+      throw new Error("Không tìm thấy đủ các sheet yêu cầu theo SCHEMA.");
     }
 
     const dataQty   = sQty.getDataRange().getValues();
-    const dataPrice = sPrice.getDataRange().getValues();
-    const dataVal   = sVal.getDataRange().getValues();
-
-    const strPeriod = String(periodTarget).trim();
-    const targetClean = strPeriod.replace(/[-\/]/g, '');
+    const targetClean = String(periodTarget).trim().replace(/\.0$/, '');
     const getIdx = (sName, cKey) => schemaGetColIndex(schemaMap, sName, cKey);
 
-    // 1. Tải đơn giá từ MONTHLY_PRICE_LIST của kỳ tương ứng
-    const mapUnitPrice = {};
+    const parsePeriod_ = (rawVal) => {
+      if (!rawVal) return "";
+      let str = String(rawVal).trim().replace(/\.0$/, '');
+      if (rawVal instanceof Date) {
+        const y = rawVal.getFullYear();
+        const m = String(rawVal.getMonth() + 1).padStart(2, '0');
+        return `${y}-${m}`;
+      }
+      if (/^\d{6}$/.test(str)) {
+        return `${str.substring(0, 4)}-${str.substring(4, 6)}`;
+      }
+      return str;
+    };
+
+    // A. Tải cost_price từ ITEM_MASTER để làm fallback cuối cùng
+    const mapCostPrice = {};
+    if (sItem) {
+      const dataItem = sItem.getDataRange().getValues();
+      const idxItemCode = getIdx(S_ITEM, "item_code");
+      const idxCostPrice = getIdx(S_ITEM, "cost_price");
+      for (let i = 1; i < dataItem.length; i++) {
+        const row = dataItem[i];
+        const code = cleanCodeValue_(row[idxItemCode]);
+        if (code && idxCostPrice !== -1) {
+          mapCostPrice[code] = Number(row[idxCostPrice]) || 0;
+        }
+      }
+    }
+
+    // B. Tải toàn bộ bảng giá lịch sử từ MONTHLY_PRICE_LIST -> Map<item_code, Map<period, unit_price>>
+    const priceHistoryMap = new Map();
+    const dataPrice = sPrice.getDataRange().getValues();
     const idxPricePeriod = getIdx(S_PRICE, "period");
     const idxPriceItem   = getIdx(S_PRICE, "item_code");
     const idxPriceVal    = getIdx(S_PRICE, "unit_price");
 
     for (let i = 1; i < dataPrice.length; i++) {
-      const p = String(dataPrice[i][idxPricePeriod] || "").trim().replace(/\.0$/, '').replace(/[-\/]/g, '');
-      if (p === targetClean) {
-        const itemCode = cleanCodeValue_(dataPrice[i][idxPriceItem]);
-        const price = Number(dataPrice[i][idxPriceVal]) || 0;
-        if (itemCode) {
-          mapUnitPrice[itemCode] = price;
+      const rawP = dataPrice[i][idxPricePeriod];
+      const p = parsePeriod_(rawP);
+      const itemCode = cleanCodeValue_(dataPrice[i][idxPriceItem]);
+      const price = Number(dataPrice[i][idxPriceVal]) || 0;
+
+      if (itemCode && p) {
+        if (!priceHistoryMap.has(itemCode)) {
+          priceHistoryMap.set(itemCode, new Map());
         }
+        priceHistoryMap.get(itemCode).set(p, price);
       }
     }
 
-    // 2. Chuẩn bị cấu trúc headers vật lý cho INVENTORY_VALUE_SUMMARY
+    // C. Hàm giải quyết đơn giá theo cơ chế Waterfall (Kỳ N -> Lùi dần về quá khứ -> Fallback Cost Price)
+    const getResolvedPrice = (itemCode, currentPeriod) => {
+      const itemPrices = priceHistoryMap.get(itemCode);
+      if (itemPrices && itemPrices.size > 0) {
+        let [year, month] = currentPeriod.includes('-') 
+          ? currentPeriod.split('-').map(Number) 
+          : [parseInt(currentPeriod.slice(0,4)), parseInt(currentPeriod.slice(4))];
+        
+        // Duyệt lùi tối đa 24 tháng về trước
+        for (let i = 0; i < 24; i++) {
+          const checkPeriod = `${year}-${String(month).padStart(2, '0')}`;
+          if (itemPrices.has(checkPeriod)) {
+            return itemPrices.get(checkPeriod);
+          }
+          month--;
+          if (month < 1) {
+            month = 12;
+            year--;
+          }
+        }
+      }
+
+      // Fallback cost_price từ item_master nếu lịch sử không có
+      if (mapCostPrice[itemCode] && mapCostPrice[itemCode] > 0) {
+        return mapCostPrice[itemCode];
+      }
+
+      return 0;
+    };
+
+    // D. Chuẩn bị headers và dữ liệu hiện tại của INVENTORY_VALUE_SUMMARY (UPSERT)
+    let currentValData = sVal.getDataRange().getValues();
     const valCols = schemaMap[S_VAL].columns.sort((a, b) => a.colIndex - b.colIndex);
     const maxColIndex = Math.max(...valCols.map(c => c.colIndex));
     const headers = new Array(maxColIndex);
     valCols.forEach(c => {
-      headers[c.colIndex - 1] = c.colHeader;
+      headers[c.colIndex - 1] = c.colHeader || c.colKey;
     });
 
-    let currentValData = dataVal;
     if (currentValData.length === 0 || currentValData[0][0] === "") {
       currentValData = [headers];
-    } else {
-      currentValData[0] = headers;
     }
 
-    const keyIndexMap = {};
     const idxValPeriod = getIdx(S_VAL, "period");
     const idxValLoc    = getIdx(S_VAL, "location_code");
     const idxValItem   = getIdx(S_VAL, "item_code");
 
+    const keyIndexMap = {};
     for (let i = 1; i < currentValData.length; i++) {
-      const p = String(currentValData[i][idxValPeriod] || "").trim().replace(/\.0$/, '').replace(/[-\/]/g, '');
+      const p = parsePeriod_(currentValData[i][idxValPeriod]);
       const loc = cleanCodeValue_(currentValData[i][idxValLoc]);
       const item = cleanCodeValue_(currentValData[i][idxValItem]);
       if (p && loc && item) {
@@ -384,14 +439,18 @@ class StockEngineValue {
 
     const nowStr = Utilities.formatDate(new Date(), tz, "yyyy-MM-dd HH:mm:ss");
 
-    // 3. Đọc dữ liệu từ INVENTORY_QTY_SUMMARY và ánh xạ tính giá trị theo quy tắc đối xứng _qty -> _value
     const idxQtyPeriod = getIdx(S_QTY, "period");
     const idxQtyLoc    = getIdx(S_QTY, "location_code");
     const idxQtyItem   = getIdx(S_QTY, "item_code");
 
+    let countMatched = 0;
+    let countInserted = 0;
+    let countUpdated = 0;
+
     for (let i = 1; i < dataQty.length; i++) {
       const rowQty = dataQty[i];
-      const p = String(rowQty[idxQtyPeriod] || "").trim().replace(/\.0$/, '').replace(/[-\/]/g, '');
+      const rawP = rowQty[idxQtyPeriod];
+      const p = parsePeriod_(rawP);
       
       if (p !== targetClean) continue;
 
@@ -399,27 +458,25 @@ class StockEngineValue {
       const itemCode     = cleanCodeValue_(rowQty[idxQtyItem]);
       if (!locationCode || !itemCode) continue;
 
-      const unitPrice = mapUnitPrice[itemCode] || 0;
-      const fullKey = `${targetClean}_${locationCode}_${itemCode}`;
+      countMatched++;
+      // Lấy đơn giá thông minh theo quy tắc Waterfall Pricing
+      const unitPrice = getResolvedPrice(itemCode, targetClean);
 
-      const rowValues = new Array(maxColIndex);
+      const rowValues = new Array(maxColIndex).fill("");
       valCols.forEach(col => {
         const colIdx = col.colIndex - 1;
         const cKey = col.colKey;
 
         if (cKey === "period") {
-          rowValues[colIdx] = strPeriod;
+          rowValues[colIdx] = targetClean;
         } else if (cKey === "location_code") {
           rowValues[colIdx] = locationCode;
         } else if (cKey === "item_code") {
           rowValues[colIdx] = itemCode;
-        } else if (cKey === "unit_price") {
-          rowValues[colIdx] = unitPrice;
         } else if (cKey === "updated_at") {
           rowValues[colIdx] = nowStr;
-        } else if (cKey.endsWith('_value')) {
-          // Tự động tìm cột _qty tương ứng và nhân với đơn giá vốn
-          const qtyKey = cKey.replace('_value', '_qty');
+        } else if (cKey.endsWith('_amt')) {
+          const qtyKey = cKey.replace('_amt', '_qty');
           const qtyColIdx = getIdx(S_QTY, qtyKey);
           if (qtyColIdx !== -1) {
             const qtyVal = Number(rowQty[qtyColIdx]) || 0;
@@ -428,22 +485,36 @@ class StockEngineValue {
             rowValues[colIdx] = 0;
           }
         } else {
-          // Các cột thông tin text/danh mục chung (tên hàng, đvt, nhóm hàng,...) lấy trực tiếp từ QTY
           const srcColIdx = getIdx(S_QTY, cKey);
           rowValues[colIdx] = srcColIdx !== -1 ? rowQty[srcColIdx] : "";
         }
       });
 
-      if (keyIndexMap[fullKey] !== undefined) {
-        currentValData[keyIndexMap[fullKey]] = rowValues;
+      const uniqueKey = `${targetClean}_${locationCode}_${itemCode}`;
+      if (keyIndexMap[uniqueKey] !== undefined) {
+        currentValData[keyIndexMap[uniqueKey]] = rowValues;
+        countUpdated++;
       } else {
         currentValData.push(rowValues);
-        keyIndexMap[fullKey] = currentValData.length - 1;
+        keyIndexMap[uniqueKey] = currentValData.length - 1;
+        countInserted++;
       }
     }
 
-    // 4. Ghi kết quả ra sheet INVENTORY_VALUE_SUMMARY
     sVal.getRange(1, 1, currentValData.length, maxColIndex).setValues(currentValData);
     SpreadsheetApp.flush();
+
+    // Chỉ hiển thị hộp thoại pop-up khi chạy lẻ thủ công; bỏ qua hoàn toàn nếu gọi từ batch
+    if (!isBatch) {
+      SpreadsheetApp.getUi().alert(
+        "✅ StockEngine Value (Upsert Thành Công)",
+        `Đã xử lý kỳ: [${targetClean}] theo chuẩn Upsert (Waterfall Pricing)` +
+        `\n- Khớp từ Qty: ${countMatched} dòng` +
+        `\n- Thêm mới (Insert): ${countInserted} dòng` +
+        `\n- Cập nhật (Update): ${countUpdated} dòng` +
+        `\n- Tổng số dòng hiện tại trong bảng: ${currentValData.length - 1}`,
+        SpreadsheetApp.getUi().ButtonSet.OK
+      );
+    }
   }
 }

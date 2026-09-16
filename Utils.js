@@ -310,3 +310,76 @@ function updateNextPeriodBalance_(ss, schemaMap, nextPeriod, newRows) {
   sBal.clearContents();
   sBal.getRange(1, 1, filteredBal.length, cols.length).setValues(filteredBal);
 }
+
+
+
+
+/**
+ * Hàm phụ trợ chuẩn hóa giá trị kỳ về dạng YYYY-MM
+ */
+function formatPeriodStandard_(val) {
+  if (!val) return "";
+  if (val instanceof Date) {
+    const y = val.getFullYear();
+    const m = String(val.getMonth() + 1).padStart(2, '0');
+    return `${y}-${m}`;
+  }
+  const str = String(val).trim();
+  // Nếu là dạng 202608 -> đổi thành 2026-08
+  if (/^\d{6}$/.test(str)) {
+    return `${str.substring(0, 4)}-${str.substring(4, 6)}`;
+  }
+  return str;
+}
+
+
+/**
+ * Private Helper: Lọc bỏ các từ dung tích/quy cách rác để gom nhóm các biến thể tên gần giống nhau
+ */
+function cleanSpecWords_(str) {
+  if (!str) return "";
+  return str.toLowerCase()
+    .replace(/\b(\d+)\s*(g|kg|ml|l|gr|pax|set)\b/gi, "")
+    .replace(/\b(hộp|túi|chai|thùng|bao|block|lốc|khay|can)\b/gi, "")
+    .replace(/[^a-zA-Z0-9àáâãèéêìíòóôõùúăđĩũơưăạảấầẩẫậắnằẳẵặẹẻẽềềểễệỉịọỏốồổỗộớờởỡợụủứừửữựỳỵỷỹ\s]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+
+
+
+/**
+ * Hàm tiện ích tự động gán số thứ tự (STT) theo nhóm mã giao dịch (trans_no)
+ * @param {Sheet} sheet - Đối tượng Sheet cần xử lý
+ * @param {number} colIndexTransNo - Chỉ số cột chứa mã giao dịch (1-based index, VD: cột A = 1)
+ * @param {number} colIndexStt - Chỉ số cột cần ghi STT nhóm (1-based index)
+ */
+function assignGroupSttByTransNo(sheet, colIndexTransNo, colIndexStt) {
+  const dataRange = sheet.getDataRange();
+  const values = dataRange.getValues();
+  
+  if (values.length <= 1) return; // Không có dữ liệu hoặc chỉ có tiêu đề
+
+  const countMap = new Map(); // Dùng để đếm số lần xuất hiện của mỗi trans_no
+  const sttColumnData = [];   // Mảng chứa giá trị STT để ghi ngược lại sheet
+
+  // Bắt đầu duyệt từ dòng thứ 2 (bỏ qua dòng tiêu đề index = 0)
+  for (let i = 1; i < values.length; i++) {
+    const transNo = values[i][colIndexTransNo - 1] ? values[i][colIndexTransNo - 1].toString().trim() : "";
+    
+    if (transNo) {
+      // Tăng số đếm cho mã giao dịch hiện tại
+      const currentCount = (countMap.get(transNo) || 0) + 1;
+      countMap.set(transNo, currentCount);
+      sttColumnData.push([currentCount]); // Gán số thứ tự trong nhóm (1, 2, 3...)
+    } else {
+      sttColumnData.push([""]); // Nếu dòng trống mã giao dịch thì bỏ trống STT
+    }
+  }
+
+  // Ghi dữ liệu STT hàng loạt (Batch update) vào cột STT từ dòng thứ 2 trở xuống
+  if (sttColumnData.length > 0) {
+    sheet.getRange(2, colIndexStt, sttColumnData.length, 1).setValues(sttColumnData);
+  }
+}
